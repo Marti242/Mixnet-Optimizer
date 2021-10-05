@@ -92,4 +92,5 @@ class Node:
                             macKey = processed[3]
 
                             _, msg = receive_forward(self.params, macKey, delta)
+
                             print(msg)
