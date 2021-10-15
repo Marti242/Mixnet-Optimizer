@@ -1,19 +1,9 @@
 import json
 import argparse
-import threading
-import numpy     as np
 
-from node import Node
-
-# Node worker
-class server(threading.Thread):
-
-   def __init__(self, node : Node):
-      threading.Thread.__init__(self)
-      self.node = node
-
-   def run(self):
-       self.node.start()
+from node         import Node
+from threading    import Thread
+from numpy.random import randint
 
 # Creates new mix net with provided number of layers, nodes per each layer, providers and users.
 def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : int):
@@ -23,22 +13,25 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
     usersToProviders = dict()
 
     # Randomly assign each user to a provider.
-    users = np.random.randint(0, high=providers, size=numUsers)
+    users = randint(0, high=providers, size=numUsers)
 
     # Map a user ID to its provider ID. User ID starts with 'u', provider ID starts with 'p'.
     for idx in range(len(users)):
-        usersToProviders['u' + str(idx)] = 'p' + str(users[idx])
+        userIdString     = "u{:02d}".format(idx)
+        providerIdString = "p{:02d}".format(users[idx])
+
+        usersToProviders[userIdString] = providerIdString
 
     # Instantiate providers and add their info to PKI.
     for provider in range(providers):
-        nodeId       = 'p' + str(provider)
-        nodes       += [Node(nodeId, 0)]
+        nodeId       = "p{:02d}".format(provider)
+        nodes       += [Node(nodeId, layer=0)]
         pki[nodeId]  = nodes[-1].toPKIView()
 
     # Instantiate each mix and add their info to PKI.
     for layer in range(1, layers + 1):
         for node in range(nodesPerLayer):
-            nodeId       = 'm' + str((layer - 1) * nodesPerLayer + node + providers)
+            nodeId       = "m{:02d}".format((layer - 1) * nodesPerLayer + node + providers)
             nodes       += [Node(nodeId, layer)]
             pki[nodeId]  = nodes[-1].toPKIView()
 
@@ -46,7 +39,7 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
     for node in nodes:
         node.setPKI(pki)
 
-        threads += [server(node)]
+        threads += [Thread(target=node.start)]
 
     # For development and debugging only - make the PKI available via JSON file.
     with open('global/pki.json', 'w') as file:
@@ -68,10 +61,10 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
 # Get command line arguments.
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--layers',        type=int)
-parser.add_argument('--numUsers',      type=int)
-parser.add_argument('--providers',     type=int)
-parser.add_argument('--nodesPerLayer', type=int)
+parser.add_argument('--layers',        type=int, default=2)
+parser.add_argument('--numUsers',      type=int, default=2)
+parser.add_argument('--providers',     type=int, default=2)
+parser.add_argument('--nodesPerLayer', type=int, default=2)
 
 args          = parser.parse_args()
 layers        = args.layers

@@ -1,66 +1,91 @@
 import string
 import socket
-import numpy  as np
 
+from bson                   import ObjectId
+from numpy                  import ceil
 from petlib.bn              import Bn
 from petlib.ec              import EcPt
 from petlib.ec              import EcGroup
+from numpy.random           import choice
+from numpy.random           import exponential
 from sphinxmix.SphinxClient import Nenc
 from sphinxmix.SphinxClient import rand_subset
 from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import pack_message
 from sphinxmix.SphinxClient import create_forward_message
 
-ALL_CHARACTERS = [char for char in string.ascii_letters + string.digits + string.punctuation]
+MAX_BODY       = 970
+DELAY_MEAN     = 1
+LOOP_MIX_LAMB  = 8
+ALL_CHARACTERS = [char for char in string.ascii_letters + string.digits + string.punctuation + ' ']
+TYPE_TO_ID     = {'LEGIT': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
+ID_TO_TYPE     = {0: 'LEGIT', 1: 'LOOP', 2: 'DROP', 3: 'LOOP_MIX'}
 
 # Construct random plaintext out of the available characters of required size.
-def randomPlaintext(size : int):
-    return bytes(''.join(list(np.random.choice(ALL_CHARACTERS, size))), encoding='utf-8')
+def randomPlaintext(size : int) -> bytes:
+    return bytes(''.join(list(choice(ALL_CHARACTERS, size))), encoding='utf-8')
 
 # Convert a hex saved public key in the PKI into petlib public key object.
-def publicKeyFromPKI(publicKey : str):
+def publicKeyFromPKI(publicKey : str) -> EcPt:
     return EcPt(EcGroup()).from_binary(Bn.from_hex(publicKey).binary(), EcGroup())
 
-def sendPacket(packet : bytes, nextAddress: int):
+def sendPacket(packet : bytes, nextAddress : int):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
         client.connect(('127.0.0.1', nextAddress))
         client.sendall(packet)
         client.close()
 
-# Create a Sphinx packet of a given type ready for sending through the mix.
-# sender      - ID of sending entity, either a user ID ('u#') for LEGIT, DROP or LOOP traffic, 
-#               or a mix ID (m#) for LOOP_MIX traffic
-# ofType      - the type of message, can be one of four:
-#                   - LEGIT
-#                   - DROP
-#                   - LOOP
-#                   - LOOP_MIX
-# size        - number of plaintext bytes
-# users       - a dictionary that maps a user ID to the ID of the provider at which they are 
-#               registered
-# perLayerPKI - dictionary of dictionaries maps a layer number to the PKI dictionary for that layer.
-#               PKI dictionary maps node ID to its PKI view. Providers are located at the 0th layer.
-# params      - SphinxParams object, its parameters can be custom set and provided here, otherwise
-#               default values are taken.
-# receiver    - Only for LEGIT traffic indicate the ID of the receiver user.
-# message     - For debugging - instead of creating random gibberish, pass something readable
-#               to check the logs and see if the mixnet works.
-def encapsulateMessage(sender      : str, 
-                       ofType      : str,
-                       size        : int,
-                       users       : dict,
-                       perLayerPKI : dict,
-                       params      : SphinxParams = SphinxParams(),
-                       receiver    : str          = None,
-                       message     : str          = None):
+def pkiToPerLayerPKI(pki : dict) -> dict:
+    perLayerPKI = dict()
+
+    for nodeId, nodePKI in pki.items():
+        if nodePKI['layer'] not in perLayerPKI:
+            perLayerPKI[nodePKI['layer']] = dict()
+
+        perLayerPKI[nodePKI['layer']][nodeId] = nodePKI
+
+    return perLayerPKI
+
+def msgWrapper(pki      : dict,
+               sender   : str, 
+               ofType   : str,
+               size     : int  = MAX_BODY,
+               users    : dict = None,
+               receiver : str  = None    ) -> list:
 
     # Ensure constraints are satisfied.
     assert  ofType in ['LEGIT', 'DROP', 'LOOP', 'LOOP_MIX']
-    assert (ofType == 'LEGIT'    and receiver  is not None) or (ofType != 'LEGIT'    and receiver  is None)
-    assert (ofType != 'LOOP_MIX' and sender[0] ==     'u' ) or (ofType == 'LOOP_MIX' and sender[0] == 'm' )
+    assert (ofType != 'LEGIT'    and size      ==     MAX_BODY) or (ofType == 'LEGIT'                         )
+    assert (ofType == 'LEGIT'    and receiver  is not None    ) or (ofType != 'LEGIT'    and receiver  is None)
+    assert (ofType != 'LOOP_MIX' and users     is not None    ) or (ofType == 'LOOP_MIX' and users     is None)
+    assert (ofType != 'LOOP_MIX' and sender[0] ==     'u'     ) or (ofType == 'LOOP_MIX' and sender[0] == 'm' )
+    
+    msgId       = str(ObjectId())
+    splits      = []
+    numSplits   = int(ceil(size / MAX_BODY))
+    perLayerPKI = pkiToPerLayerPKI(pki)
 
-    # Convert the perLayerPKI into a global PKI view.
-    pki = dict([node for layer in list(perLayerPKI.values()) for node in layer.items()])
+    wrapper = lambda x, y : makeMsg(sender, ofType, receiver, msgId, x, y, pki, users, perLayerPKI)
+    
+    for split in range(numSplits):
+        splitSize = MAX_BODY
+        
+        if split == numSplits-1:
+            splitSize = size - MAX_BODY * (numSplits-1)
+            
+        splits += [wrapper(splitSize, split) + (msgId,)]
+        
+    return splits
+
+def makeMsg(sender      : str, 
+            ofType      : str,
+            receiver    : str,
+            messageId   : str,
+            size        : int,
+            split       : int,
+            pki         : dict,
+            users       : dict,
+            perLayerPKI : dict) -> tuple :
 
     if ofType == 'LOOP_MIX':
         layer = pki[sender]['layer']
@@ -101,16 +126,18 @@ def encapsulateMessage(sender      : str,
 
         path = [senderProvider] + path + [receiverProvider]
 
-    keys = [publicKeyFromPKI(pki[nodeId]['publicKey']) for nodeId in path]
+    keys        = [publicKeyFromPKI(pki[nodeId]['publicKey']) for nodeId in path]
+    destination = (destination, messageId, split, TYPE_TO_ID[ofType])
+    nencWrapper = lambda dest, delay: Nenc((dest, delay, messageId, split, TYPE_TO_ID[ofType]))
 
-    # Add routing information for each mix. For the simulation purposes add also data for logging.
-    routing = [Nenc((prev, dest)) for (prev, dest) in zip([None, sender] + path[:-2], path)]
+    # Add routing information for each mix, sample delays.
+    routing = [nencWrapper(dest, exponential(DELAY_MEAN)) for dest in path]
 
-    # Instantiate random message if None was passed.
-    if message is None:
-        message = randomPlaintext(size) 
+    # Instantiate random message.
+    message = randomPlaintext(size) 
     
+    params        = SphinxParams(header_len=223)
     header, delta = create_forward_message(params, routing, keys, destination, message)
     packed        = pack_message(params, (header, delta))
 
-    return packed
+    return packed, path[0]
