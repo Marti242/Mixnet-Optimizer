@@ -1,7 +1,7 @@
-import json
-import argparse
 
+from json         import dump
 from node         import Node
+from argparse     import ArgumentParser
 from threading    import Thread
 from numpy.random import randint
 
@@ -43,11 +43,11 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
 
     # For development and debugging only - make the PKI available via JSON file.
     with open('global/pki.json', 'w') as file:
-        json.dump(pki, file)
+        dump(pki, file)
         file.close()
 
     with open('global/users.json', 'w') as file:
-        json.dump(usersToProviders, file)
+        dump(usersToProviders, file)
         file.close()
 
     # Run the mixnet.
@@ -59,7 +59,7 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
         thread.join()
 
 # Get command line arguments.
-parser = argparse.ArgumentParser()
+parser = ArgumentParser()
 
 parser.add_argument('--layers',        type=int, default=2)
 parser.add_argument('--numUsers',      type=int, default=2)

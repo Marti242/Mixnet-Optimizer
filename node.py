@@ -8,8 +8,8 @@ from queue                  import PriorityQueue
 from socket                 import socket
 from socket                 import AF_INET
 from socket                 import SOCK_STREAM
-from selectors              import DefaultSelector
 from selectors              import EVENT_READ
+from selectors              import DefaultSelector
 from threading              import Thread
 from numpy.random           import exponential
 from sphinxmix.SphinxNode   import sphinx_process
