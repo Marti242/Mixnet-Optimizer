@@ -52,7 +52,7 @@ jupyterlab-widgets @ file:///tmp/build/80754af9/jupyterlab_widgets_1609884341231
 kiwisolver @ file:///tmp/build/80754af9/kiwisolver_1612281846643/work
 Markdown @ file:///tmp/build/80754af9/markdown_1614363852612/work
 MarkupSafe @ file:///tmp/build/80754af9/markupsafe_1621523467000/work
-matplotlib @ file:///tmp/build/80754af9/matplotlib-suite_1628003481308/work
+matplotlib @ file:///tmp/build/80754af9/matplotlib-suite_1634667019719/work
 matplotlib-inline @ file:///tmp/build/80754af9/matplotlib-inline_1628242447089/work
 mistune @ file:///tmp/build/80754af9/mistune_1607364877025/work
 mkl-fft==1.3.1

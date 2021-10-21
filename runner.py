@@ -1,26 +1,47 @@
-
-from json         import dump
+from json         import load
 from node         import Node
+from util         import msgWrapper
+from client       import Client
 from argparse     import ArgumentParser
 from threading    import Thread
 from numpy.random import randint
 
-# Creates new mix net with provided number of layers, nodes per each layer, providers and users.
-def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : int):
+# Creates new mix net with provided number of layers, nodes per each layer and providers.
+def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer : int):
     pki              = dict()
     nodes            = []
+    clients          = []
     threads          = []
+    userIds          = []
+    legitTraffic     = dict()
     usersToProviders = dict()
+
+    with open(tracesFile, 'r') as file:
+        traces = load(file)
+
+        file.close()
+
+    for mail in traces:
+        sender = mail['sender']
+
+        if sender not in legitTraffic:
+            legitTraffic[sender] = [mail]
+        else:
+            legitTraffic[sender] += [mail]
+
+        userIds += [sender, mail['receiver']]
+
+    userIds  = sorted(list(set(userIds)))
+    numUsers = len(userIds)
 
     # Randomly assign each user to a provider.
     users = randint(0, high=providers, size=numUsers)
 
     # Map a user ID to its provider ID. User ID starts with 'u', provider ID starts with 'p'.
-    for idx in range(len(users)):
-        userIdString     = "u{:02d}".format(idx)
+    for idx in range(numUsers):
         providerIdString = "p{:02d}".format(users[idx])
 
-        usersToProviders[userIdString] = providerIdString
+        usersToProviders[userIds[idx]] = providerIdString
 
     # Instantiate providers and add their info to PKI.
     for provider in range(providers):
@@ -41,14 +62,11 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
 
         threads += [Thread(target=node.start)]
 
-    # For development and debugging only - make the PKI available via JSON file.
-    with open('global/pki.json', 'w') as file:
-        dump(pki, file)
-        file.close()
+    for userId, mails in legitTraffic.items():
+        userMsgGenerator = lambda  x, y, z, w : msgWrapper(pki, x, y, z, usersToProviders, w)
 
-    with open('global/users.json', 'w') as file:
-        dump(usersToProviders, file)
-        file.close()
+        clients += [Client(userId, mails, userMsgGenerator, pki[usersToProviders[userId]]['port'])]
+        threads += [Thread(target=clients[-1].start)]
 
     # Run the mixnet.
     for thread in threads:
@@ -62,14 +80,14 @@ def createMixnet(layers : int, numUsers : int, providers : int, nodesPerLayer : 
 parser = ArgumentParser()
 
 parser.add_argument('--layers',        type=int, default=2)
-parser.add_argument('--numUsers',      type=int, default=2)
 parser.add_argument('--providers',     type=int, default=2)
+parser.add_argument('--tracesFile',    type=str, default="global/sample.json")
 parser.add_argument('--nodesPerLayer', type=int, default=2)
 
 args          = parser.parse_args()
 layers        = args.layers
-numUsers      = args.numUsers
 providers     = args.providers
+tracesFile    = args.tracesFile
 nodesPerLayer = args.nodesPerLayer
 
-createMixnet(layers, numUsers, providers, nodesPerLayer)
+createMixnet(layers, providers, tracesFile, nodesPerLayer)

@@ -2,18 +2,18 @@ from time                   import time
 from time                   import sleep
 from util                   import sendPacket
 from util                   import msgWrapper
-from util                   import ID_TO_TYPE
-from util                   import LOOP_MIX_LAMB
 from queue                  import PriorityQueue
 from socket                 import socket
 from socket                 import AF_INET
 from socket                 import SOCK_STREAM
+from threading              import Thread
 from selectors              import EVENT_READ
 from selectors              import DefaultSelector
-from threading              import Thread
+from constants              import ID_TO_TYPE
+from constants              import SPHINX_PARAMS
+from constants              import LOOP_MIX_LAMB
 from numpy.random           import exponential
 from sphinxmix.SphinxNode   import sphinx_process
-from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import PFdecode
 from sphinxmix.SphinxClient import Dest_flag
 from sphinxmix.SphinxClient import Relay_flag
@@ -26,7 +26,7 @@ class Node:
     def __init__(self, nodeId : str, layer : int):
         self.port         = 49152 + int(nodeId[1:])
         self.layer        = layer
-        self.params       = SphinxParams(header_len=223)
+        self.params       = SPHINX_PARAMS
         self.nodeId       = nodeId
         self.selector     = DefaultSelector()
         self.tagCache     = set()
@@ -115,16 +115,22 @@ class Node:
             conn.close()  
 
     def sender(self,):
+        data        = None
         sendingTime = time() + exponential(LOOP_MIX_LAMB)
 
         while True:
             if not self.messageQueue.empty() and self.messageQueue.queue[0][0] < time():
-                data        = self.messageQueue.get()
-                packet      = data[1][0]
-                nextNode    = data[1][1]
-                messageId   = data[1][2]
-                split       = data[1][3]
-                ofType      = data[1][4]
+                data = self.messageQueue.get()[1]
+
+            elif self.layer != 0 and sendingTime < time():
+                data = msgWrapper(self.pki, self.nodeId, 'LOOP_MIX')[0] + ('0', 'LOOP_MIX')
+
+            if data is not None:
+                packet      = data[0]
+                nextNode    = data[1]
+                messageId   = data[2]
+                split       = data[3]
+                ofType      = data[4]
                 nextAddress = self.pki[nextNode]['port']
 
                 sendPacket(packet, nextAddress)
@@ -132,20 +138,11 @@ class Node:
                 timeString = "{:.7f}".format(time())
                 
                 print(' '.join([timeString, self.nodeId, nextNode, messageId, split, ofType]))
-            elif self.layer != 0 and sendingTime < time():
-                loopMsg     = msgWrapper(self.pki, self.nodeId, 'LOOP_MIX')
-                packet      = loopMsg[0][0]
-                nextNode    = loopMsg[0][1]
-                messageId   = loopMsg[0][2]
-                nextAddress = self.pki[nextNode]['port']
-
-                sendPacket(packet, nextAddress)
-
-                timeString = "{:.7f}".format(time())
                 
-                print(' '.join([timeString, self.nodeId, nextNode, messageId, '0', 'LOOP_MIX']))
+                data = None
 
-                sendingTime = time() + exponential(LOOP_MIX_LAMB)
+                if ofType == 'LOOP_MIX':
+                    sendingTime = time() + exponential(LOOP_MIX_LAMB)
             else:
                 sleep(0.01)
 

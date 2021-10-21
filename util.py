@@ -3,26 +3,20 @@ from numpy                  import ceil
 from socket                 import socket
 from socket                 import AF_INET
 from socket                 import SOCK_STREAM
-from string                 import digits
-from string                 import punctuation
-from string                 import ascii_letters
 from petlib.bn              import Bn
 from petlib.ec              import EcPt
 from petlib.ec              import EcGroup
+from constants              import MAX_BODY
+from constants              import DELAY_MEAN
+from constants              import TYPE_TO_ID
+from constants              import SPHINX_PARAMS
+from constants              import ALL_CHARACTERS
 from numpy.random           import choice
 from numpy.random           import exponential
 from sphinxmix.SphinxClient import Nenc
 from sphinxmix.SphinxClient import rand_subset
-from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import pack_message
 from sphinxmix.SphinxClient import create_forward_message
-
-MAX_BODY       = 970
-DELAY_MEAN     = 1
-LOOP_MIX_LAMB  = 8
-ALL_CHARACTERS = [char for char in ascii_letters + digits + punctuation + ' ']
-TYPE_TO_ID     = {'LEGIT': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
-ID_TO_TYPE     = {0: 'LEGIT', 1: 'LOOP', 2: 'DROP', 3: 'LOOP_MIX'}
 
 # Construct random plaintext out of the available characters of required size.
 def randomPlaintext(size : int) -> bytes:
@@ -139,7 +133,7 @@ def makeMsg(sender      : str,
     # Instantiate random message.
     message = randomPlaintext(size) 
     
-    params        = SphinxParams(header_len=223)
+    params        = SPHINX_PARAMS
     header, delta = create_forward_message(params, routing, keys, destination, message)
     packed        = pack_message(params, (header, delta))
 
