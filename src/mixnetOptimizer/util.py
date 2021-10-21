@@ -62,24 +62,24 @@ def msgWrapper(pki      : dict,
     numSplits   = int(ceil(size / MAX_BODY))
     perLayerPKI = pkiToPerLayerPKI(pki)
 
-    wrapper = lambda x, y : makeMsg(sender, ofType, receiver, msgId, x, y, pki, users, perLayerPKI)
+    wrapper = lambda x, y : makeMsg(x, sender, ofType, receiver, msgId, y, pki, users, perLayerPKI)
     
     for split in range(numSplits):
         splitSize = MAX_BODY
         
         if split == numSplits-1:
             splitSize = size - MAX_BODY * (numSplits-1)
-            
-        splits += [wrapper(splitSize, split) + (msgId,)]
+
+        splits += [wrapper("{:05d}".format(split), splitSize)]
         
     return splits
 
-def makeMsg(sender      : str, 
+def makeMsg(split       : str,
+            sender      : str, 
             ofType      : str,
             receiver    : str,
             messageId   : str,
             size        : int,
-            split       : int,
             pki         : dict,
             users       : dict,
             perLayerPKI : dict) -> tuple :
@@ -137,4 +137,4 @@ def makeMsg(sender      : str,
     header, delta = create_forward_message(params, routing, keys, destination, message)
     packed        = pack_message(params, (header, delta))
 
-    return packed, path[0]
+    return packed, path[0], messageId, split, ofType

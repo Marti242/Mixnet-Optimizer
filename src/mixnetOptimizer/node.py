@@ -87,7 +87,7 @@ class Node:
                 nextNode    = routing[1][0]
                 delay       = routing[1][1]
                 messageId   = routing[1][2]
-                split       = str(routing[1][3])
+                split       = routing[1][3]
                 ofType      = ID_TO_TYPE[routing[1][4]]
                 packed      = pack_message(self.params, processed[2])
                 queueTuple  = (packed, nextNode, messageId, split, ofType)
@@ -103,7 +103,7 @@ class Node:
 
                 destination = dest[0].decode('utf-8')
                 messageId   = dest[1]
-                split       = str(dest[2])
+                split       = dest[2]
                 ofType      = ID_TO_TYPE[dest[3]]
                 timeString  = "{:.7f}".format(time())
 
@@ -123,7 +123,7 @@ class Node:
                 data = self.messageQueue.get()[1]
 
             elif self.layer != 0 and sendingTime < time():
-                data = msgWrapper(self.pki, self.nodeId, 'LOOP_MIX')[0] + ('0', 'LOOP_MIX')
+                data = msgWrapper(self.pki, self.nodeId, 'LOOP_MIX')[0]
 
             if data is not None:
                 packet      = data[0]

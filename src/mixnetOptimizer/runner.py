@@ -39,20 +39,20 @@ def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer 
 
     # Map a user ID to its provider ID. User ID starts with 'u', provider ID starts with 'p'.
     for idx in range(numUsers):
-        providerIdString = "p{:02d}".format(users[idx])
+        providerIdString = "p{:06d}".format(users[idx])
 
         usersToProviders[userIds[idx]] = providerIdString
 
     # Instantiate providers and add their info to PKI.
     for provider in range(providers):
-        nodeId       = "p{:02d}".format(provider)
+        nodeId       = "p{:06d}".format(provider)
         nodes       += [Node(nodeId, layer=0)]
         pki[nodeId]  = nodes[-1].toPKIView()
 
     # Instantiate each mix and add their info to PKI.
     for layer in range(1, layers + 1):
         for node in range(nodesPerLayer):
-            nodeId       = "m{:02d}".format((layer - 1) * nodesPerLayer + node + providers)
+            nodeId       = "m{:06d}".format((layer - 1) * nodesPerLayer + node + providers)
             nodes       += [Node(nodeId, layer)]
             pki[nodeId]  = nodes[-1].toPKIView()
 
@@ -81,7 +81,7 @@ parser = ArgumentParser()
 
 parser.add_argument('--layers',        type=int, default=2)
 parser.add_argument('--providers',     type=int, default=2)
-parser.add_argument('--tracesFile',    type=str, default="global/sample.json")
+parser.add_argument('--tracesFile',    type=str, default="../../data/sample.json")
 parser.add_argument('--nodesPerLayer', type=int, default=2)
 
 args          = parser.parse_args()

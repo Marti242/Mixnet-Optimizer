@@ -18,7 +18,7 @@ class Client:
         self.providerPort = providerPort
 
         for mail in rawMails:
-            self.rawMails.put_nowait((time() + mail['sending_time'], mail))
+            self.rawMails.put_nowait((time() + mail['time'] + 10, mail))
 
     def start(self,):
         data            = None
@@ -34,23 +34,23 @@ class Client:
                 mail   = self.rawMails.get_nowait()[1]
                 splits = self.msgCreator(self.userId, 'LEGIT', mail['size'], mail['receiver'])
 
-                for idx, split in enumerate(splits):
-                    self.messageQueue.put_nowait(split + (str(idx), 'LEGIT'))
+                for split in splits:
+                    self.messageQueue.put_nowait(split)
 
             if not self.messageQueue.empty() and timers['LEGIT'] < time():
                 data       = self.messageQueue.get_nowait()
                 updateType = 'LEGIT'
 
             elif self.messageQueue.empty() and timers['LEGIT'] < time():
-                data       = self.msgCreator(self.userId, 'DROP', MAX_BODY, None)[0] + ('0', 'DROP')
+                data       = self.msgCreator(self.userId, 'DROP', MAX_BODY, None)[0]
                 updateType = 'LEGIT'
 
             elif timers['DROP'] < time():
-                data       = self.msgCreator(self.userId, 'DROP', MAX_BODY, None)[0] + ('0', 'DROP')
+                data       = self.msgCreator(self.userId, 'DROP', MAX_BODY, None)[0]
                 updateType = 'DROP'
 
             elif timers['LOOP'] < time():
-                data       = self.msgCreator(self.userId, 'LOOP', MAX_BODY, None)[0] + ('0', 'LOOP')
+                data       = self.msgCreator(self.userId, 'LOOP', MAX_BODY, None)[0]
                 updateType = 'LOOP'
 
             if data is not None:
