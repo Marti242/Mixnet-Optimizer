@@ -2,6 +2,8 @@ from json         import load
 from node         import Node
 from util         import msgWrapper
 from client       import Client
+from logging      import INFO
+from logging      import basicConfig
 from argparse     import ArgumentParser
 from threading    import Thread
 from numpy.random import randint
@@ -15,6 +17,8 @@ def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer 
     userIds          = []
     legitTraffic     = dict()
     usersToProviders = dict()
+
+    basicConfig(filename='../../logs/logs.log', level=INFO, encoding='utf-8')
 
     with open(tracesFile, 'r') as file:
         traces = load(file)

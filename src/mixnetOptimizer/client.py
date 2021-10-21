@@ -1,10 +1,10 @@
-
 from time         import time
 from time         import sleep
 from util         import sendPacket
 from queue        import Queue
 from queue        import PriorityQueue
 from typing       import Callable
+from logging      import info
 from constants    import LAMBDAS
 from constants    import MAX_BODY
 from numpy.random import exponential
@@ -62,9 +62,9 @@ class Client:
 
                 sendPacket(packet, self.providerPort)
 
-                timeString = "{:.7f}".format(time())
-                
-                print(' '.join([timeString, self.userId, nextNode, messageId, split, ofType]))
+                timeStr = "{:.7f}".format(time())
+
+                info('%s %s %s %s %s %s', timeStr, self.userId, nextNode, messageId, split, ofType)
 
                 data               = None
                 timers[updateType] = time() + exponential(LAMBDAS[updateType])

@@ -6,6 +6,7 @@ from queue                  import PriorityQueue
 from socket                 import socket
 from socket                 import AF_INET
 from socket                 import SOCK_STREAM
+from logging                import info
 from threading              import Thread
 from selectors              import EVENT_READ
 from selectors              import DefaultSelector
@@ -72,9 +73,9 @@ class Node:
 
             processed = sphinx_process(self.params, self.secretKey, header, delta)
             tag       = processed[0]
-            info      = processed[1]
+            routing   = processed[1]
 
-            routing = PFdecode(self.params, info)
+            routing = PFdecode(self.params, routing)
             flag    = routing[0]
 
             if tag in self.tagCache:
@@ -102,14 +103,12 @@ class Node:
                 dest, _ = receive_forward(self.params, macKey, delta)
 
                 destination = dest[0].decode('utf-8')
-                messageId   = dest[1]
+                msgId       = dest[1]
                 split       = dest[2]
                 ofType      = ID_TO_TYPE[dest[3]]
-                timeString  = "{:.7f}".format(time())
+                timeStr     = "{:.7f}".format(time())
 
-                logs = [timeString, self.nodeId, destination, messageId, split, ofType]
-
-                print(' '.join(logs))
+                info('%s %s %s %s %s %s', timeStr, self.nodeId, destination, msgId, split, ofType)
         else:
             self.selector.unregister(conn)
             conn.close()  
@@ -135,9 +134,9 @@ class Node:
 
                 sendPacket(packet, nextAddress)
 
-                timeString = "{:.7f}".format(time())
-                
-                print(' '.join([timeString, self.nodeId, nextNode, messageId, split, ofType]))
+                timeStr = "{:.7f}".format(time())
+
+                info('%s %s %s %s %s %s', timeStr, self.nodeId, nextNode, messageId, split, ofType)
                 
                 data = None
 

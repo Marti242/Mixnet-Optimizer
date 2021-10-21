@@ -4,8 +4,8 @@ from string                 import ascii_letters
 from sphinxmix.SphinxParams import SphinxParams
 
 LAMBDAS          = dict()
-LAMBDAS['DROP' ] = 3 * 7.879036505057893
-LAMBDAS['LOOP' ] = 2 * 7.879036505057893
+LAMBDAS['DROP' ] = 6 * 7.879036505057893
+LAMBDAS['LOOP' ] = 6 * 7.879036505057893
 LAMBDAS['LEGIT'] = 2 * 7.879036505057893
 
 MAX_BODY       = 1024
