@@ -50,17 +50,17 @@ def __pkiToPerLayerPKI(pki : dict) -> dict:
 # ofType      - enum, 'LEGIT', 'DROP', 'LOOP' or 'LOOP_MIX'.
 # receiver    - ID of receiving entity, only valid for LEGIT traffic, a user (u<######>). For other 
 #               types of the receiver is implicitly defined.
-# messageId   - message Id - string in the pymongo ObjectId format.
+# messageId   - message ID - string in the pymongo bson ObjectId format.
 # size        - number of plaintext bytes, should be different than default only if the message 
 #               is of LEGIT type.
 # pki         - dictionary maps node ID (mix or provider) to its PKI info (listening port, public 
 #               key, layer).
 # users       - dictionary, maps user ID to its provider ID.
-# perLayerPKI - pki dictionary converted via __pkiToPerLayerPKI method
+# perLayerPKI - pki dictionary converted via __pkiToPerLayerPKI method.
 # return      - Tuple of Sphinx packet with information for logging:
 #                   - packet.
 #                   - next Node to which packet should be forwarded.
-#                   - message Id - string in the pymongo ObjectId format.
+#                   - message ID - string in the pymongo bson ObjectId format.
 #                   - split - ordinal number for reordering the purpose in string format (5 digit 
 #                     string <#####>).
 #                   - type of message.
@@ -93,7 +93,7 @@ def __genPckt(split       : str,
         senderProvider = users[sender]
         path           = []
 
-        # Sample random path through mix (one mix per each layer)
+        # Sample random path through mix (one mix per each layer).
         for layer in range(1, len(perLayerPKI)):
             path += rand_subset(perLayerPKI[layer], 1)
 

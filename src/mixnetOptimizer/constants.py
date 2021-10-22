@@ -11,7 +11,7 @@ DEFAULT VALUES
 DYNAMIC MIXNET PARAMETERS - can change within a single experiment.
 """
 
-# Parameters of a Poisson process for clients emitting cover traffic.
+# Parameters of a Poisson process for emitting traffic.
 # 7.879036505057893 is the mean time between two emails being sent in the dataset.
 LAMBDAS             = dict()
 LAMBDAS['DROP'    ] = 7.879036505057893
@@ -32,7 +32,7 @@ LEGIT_LAG = 10
 
 # TO DO:
 # Current hardcoded values work empirically.
-# Identify formula for Sphinx packet header & body length, given mixnet architecture, so that 
+# Identify formula for Sphinx packet header & body length, given mixnet topology, so that 
 # different message sizes can be tried automatically by the optimizer without human changing the
 # hardcoded values in the loop.
 # CURRENT SETTING IS NOT ROBUST FOR VARYING MIXNET TOPOLOGIES!!!
@@ -45,7 +45,7 @@ UTIL
 # Poll of characters from which plaintext messages are created.
 ALL_CHARACTERS = list(ascii_letters + digits + punctuation + ' ')
 
-# Mapping between human-readable message type for display in logging & compact ids encapsulated
+# Mapping between human-readable message type for display in logging & compact IDs encapsulated
 # in Sphinx packet routing information. Metadata is more uniform and takes less space in the packet 
 # header. 
 TYPE_TO_ID = {'LEGIT': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
