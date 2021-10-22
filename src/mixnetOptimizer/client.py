@@ -102,11 +102,11 @@ class Client:
 
                 info('%s %s %s %s %s %s', timeStr, self.__userId, nextNode, msgId, split, ofType)
 
+                # Reset the timer for a given message type.
+                timers[updateType] = time() + exponential(LAMBDAS[updateType])
+
                 # Reset the state.
                 data       = None
                 updateType = None
-
-                # Reset the timer for a given message type.
-                timers[updateType] = time() + exponential(LAMBDAS[updateType])
             else:
                 sleep(0.01)

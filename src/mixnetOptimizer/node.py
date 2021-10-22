@@ -77,7 +77,7 @@ class Node:
             header   = unpacked[1][0]
             delta    = unpacked[1][1]
 
-            processed = sphinx_process(self.__params, self.__secretKey, header, delta)
+            processed = sphinx_process(SPHINX_PARAMS, self.__secretKey, header, delta)
             tag       = processed[0]
             routing   = processed[1]
 
