@@ -3,7 +3,7 @@ Minimal implementation of the [Loopix mix network design](https://www.usenix.org
 # 📧 How to run
 
 ```
-$ python runner.py --layers 2 --bodySize 1024 --providers 2 --tracesFile <path_to_traces_file> --nodesPerLayer 2
+$ python runner.py --layers 2 --bodySize 1024 --providers 2 --tracesFile <pathToTracesFile> --nodesPerLayer 2
 ```
 
 ### Arguments:
@@ -26,18 +26,18 @@ $ python runner.py --layers 2 --bodySize 1024 --providers 2 --tracesFile <path_t
 A `logs.log` file in the `logs` directory. Logging format:
 
 ```
-INFO:root:<timestamp> <sender_ID> <receiver_ID> <message_ID> <chunk_number> <traffic_type>
+INFO:root:<timestamp> <senderId> <receiverId> <messageId> <chunkNumber> <trafficType>
 ```
 
 - `timestamp` - time at which the message was sent.
-- `sender_ID` - ID of the sending entity. The first letter defines the type of the sending entity. It is followed by 6 digit ID string.
+- `senderId` - ID of the sending entity. The first letter defines the type of the sending entity. It is followed by 6 digit ID string.
   - `u` for user.
   - `m` for mix
   - `p` for provider.
-- `receiver_ID` - same as `sender_ID` but for receiver.
-- `message_ID` - the `pymongo bson ObjectId` string to identify a message. When a `LEGIT` message is split into chunks all of the chunks have the same `message_ID`. A combination of `message_ID` and `chunk_number` uniquely identifies any packet. Multiple packets of the same message having the same `message_ID` make it easier to compute E2E latency for the entire message.
-- `chunk_number` - an ordinal identifier that helps to rebuild message split into chunks back to original.
-- `traffic_type` - the type of the sent packet, `LEGIT`, `DROP`, `LOOP` or `LOOP_MIX`.
+- `receiverId` - same as `senderId` but for receiver.
+- `messageId` - the `pymongo bson ObjectId` string to identify a message. When a `LEGIT` message is split into chunks all of the chunks have the same `messageId`. A combination of `messageId` and `chunkNumber` uniquely identifies any packet. Multiple packets of the same message having the same `messageId` make it easier to compute E2E latency for the entire message.
+- `chunkNumber` - an ordinal identifier that helps to rebuild message split into chunks back to original.
+- `trafficType` - the type of the sent packet, `LEGIT`, `DROP`, `LOOP` or `LOOP_MIX`.
 
 A sample of logging format:
 
