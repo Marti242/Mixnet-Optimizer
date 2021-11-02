@@ -1,13 +1,15 @@
-from json         import load
-from node         import Node
-from util         import generateMessage
-from client       import Client
-from logging      import INFO
-from logging      import basicConfig
-from threading    import Thread
-from numpy.random import randint
+from json                   import load
+from node                   import Node
+from util                   import generateMessage
+from client                 import Client
+from logging                import INFO
+from logging                import basicConfig
+from threading              import Thread
+from numpy.random           import randint
+from sphinxmix.SphinxParams import SphinxParams
 
-# Creates new mix net with provided number of layers, nodes per each layer and providers.
+# Creates new mix net with a provided number of layers, nodes per each layer and providers. 
+# A plaintext of a packet in a mix can have at most bodySize of bytes.
 # tracesFile - a path to JSON file with legitimate traffic traces that should be emitted 
 #              in a simulation. A tracesFile is a list of email objects. Email object is a dict 
 #              with:
@@ -17,7 +19,11 @@ from numpy.random import randint
 #                    (there are over 100k users in the training set).
 #                  - size - the number of bytes in a plaintext mail message.
 #                  - receiver - the user ID of the receiving entity. The same format as the sender.
-def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer : int):
+def createMixnet(layers        : int, 
+                 bodySize      : int, 
+                 providers     : int, 
+                 tracesFile    : str, 
+                 nodesPerLayer : int):
 
     # Ensure the provided tracesFile is in JSON format.
     assert tracesFile[-5:] == '.json'
@@ -36,7 +42,7 @@ def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer 
     legitTraffic = dict()
 
     # Maps user ID to its provider ID.
-    usersToProviders = dict()
+    users = dict()
 
     # Logging configuration. All nodes & clients log to same file.
     basicConfig(filename='../../logs/logs.log', level=INFO, encoding='utf-8')
@@ -63,19 +69,37 @@ def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer 
     numUsers = len(userIds)
 
     # Randomly assign each user to a provider.
-    users = randint(0, high=providers, size=numUsers)
+    userIdxToProvider = randint(0, high=providers, size=numUsers)
 
     # Map a user ID to its provider ID. User ID starts with 'u', provider ID starts with 'p', they 
     # are followed by 6 digit ID string (there are over 100k users in the dataset).
     for idx in range(numUsers):
-        providerIdString = "p{:06d}".format(users[idx])
+        providerIdString = "p{:06d}".format(userIdxToProvider[idx])
 
-        usersToProviders[userIds[idx]] = providerIdString
+        users[userIds[idx]] = providerIdString
+
+    # Set the global static variables - things that do not change within an experiment. Mainly, the 
+    # packet size and other variables that depend on it such as the size of the connection buffer, 
+    # size of the packet header and plaintext body.
+    if bodySize < 65536:
+        addBody   = 63
+        addBuffer = 36
+    else:
+        addBody   = 65
+        addBuffer = 40
+
+    if 0 < layers and layers < 3:
+        addBuffer += 1
+    elif 2 < layers:
+        addBuffer += 3
+    
+    headerLen = 71 * layers + 108
+    params    = SphinxParams(body_len=bodySize + addBody, header_len=headerLen)
 
     # Instantiate providers and add their info to PKI.
     for provider in range(providers):
         nodeId       = "p{:06d}".format(provider)
-        nodes       += [Node(nodeId, layer=0)]
+        nodes       += [Node(0, nodeId, params, bodySize, addBuffer)]
         pki[nodeId]  = nodes[-1].toPKIView()
 
     # Instantiate each mix and add their info to PKI.
@@ -86,7 +110,7 @@ def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer 
             # provider numeration. Node IDs define listening ports, so overall node ID configuration
             # avoids port collisions.
             nodeId       = "m{:06d}".format((layer - 1) * nodesPerLayer + node + providers)
-            nodes       += [Node(nodeId, layer)]
+            nodes       += [Node(layer, nodeId, params, bodySize, addBuffer)]
             pki[nodeId]  = nodes[-1].toPKIView()
 
     # Propagate the global PKI state to each node.
@@ -106,10 +130,10 @@ def createMixnet(layers : int, providers : int, tracesFile : str, nodesPerLayer 
         # y - the type of message to generate, enum.
         # z - the size of the plaintext message in bytes.
         # w - receiver, an ID of the receiving user for LEGIT traffic.
-        userMsgGenerator = lambda  x, y, z, w : generateMessage(pki, x, y, z, usersToProviders, w)
+        usrMsgGen = lambda  x, y, z, w : generateMessage(pki, x, y, params, z, bodySize, users, w)
 
         # Instantiate the clients.
-        clients += [Client(userId, mails, userMsgGenerator, pki[usersToProviders[userId]]['port'])]
+        clients += [Client(userId, bodySize, mails, usrMsgGen, pki[users[userId]]['port'])]
         threads += [Thread(target=clients[-1].start)]
 
     # TO DO:

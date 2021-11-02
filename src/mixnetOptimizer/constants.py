@@ -1,7 +1,6 @@
-from string                 import digits
-from string                 import punctuation
-from string                 import ascii_letters
-from sphinxmix.SphinxParams import SphinxParams
+from string import digits
+from string import punctuation
+from string import ascii_letters
 
 """
 DEFAULT VALUES
@@ -24,19 +23,8 @@ LAMBDAS['LOOP_MIX'] = 7.879036505057893
 STATIC MIXNET PARAMETERS - do not change within a single experiment.
 """
 
-# Packet payload size.
-MAX_BODY = 1024
-
 # Number of seconds between starting the mixnet and sending first LEGIT message.
 LEGIT_LAG = 10
-
-# TO DO:
-# Current hardcoded values work empirically.
-# Identify formula for Sphinx packet header & body length, given mixnet topology, so that 
-# different message sizes can be tried automatically by the optimizer without human changing the
-# hardcoded values in the loop.
-# CURRENT SETTING IS NOT ROBUST FOR VARYING MIXNET TOPOLOGIES!!!
-SPHINX_PARAMS = SphinxParams(body_len=MAX_BODY + 63, header_len=250)
 
 """
 UTIL

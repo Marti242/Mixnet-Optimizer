@@ -3,12 +3,13 @@ Minimal implementation of the [Loopix mix network design](https://www.usenix.org
 # 📧 How to run
 
 ```
-$ python runner.py --layers 3 --providers 2 --tracesFile <path_to_traces_file> --nodesPerLayer 2
+$ python runner.py --layers 2 --bodySize 1024 --providers 2 --tracesFile <path_to_traces_file> --nodesPerLayer 2
 ```
 
 ### Arguments:
 
 - `layers` - number of layers in the mixnet.
+- `bodySize` - the size of plaintext in a Sphinx packet in bytes. _(Smaller messages are padded to have this length, longer messages are split. The overall body of the Sphinx packet is a bit larger, but the sizes of all packets in the mixnet are consistent together with their headers.)_
 - `providers` - number of providers in the mixnet.
 - `tracesFile` - a path to a JSON file with legitimate traffic traces that should be mimicked in the simulation. It should hold a list of email objects (definition of email object below).
 - `nodesPerLayer` - number of nodes in a single layer of a mixnet.

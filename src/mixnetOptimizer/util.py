@@ -7,12 +7,11 @@ from petlib.bn              import Bn
 from petlib.ec              import EcPt
 from petlib.ec              import EcGroup
 from constants              import LAMBDAS
-from constants              import MAX_BODY
 from constants              import TYPE_TO_ID
-from constants              import SPHINX_PARAMS
 from constants              import ALL_CHARACTERS
 from numpy.random           import choice
 from numpy.random           import exponential
+from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import Nenc
 from sphinxmix.SphinxClient import rand_subset
 from sphinxmix.SphinxClient import pack_message
@@ -57,6 +56,8 @@ def __pkiToPerLayerPKI(pki : dict) -> dict:
 #               key, layer).
 # users       - dictionary, maps user ID to its provider ID.
 # perLayerPKI - pki dictionary converted via __pkiToPerLayerPKI method.
+# params      - an instance of SphinxParams object that defines the sphinx packet size, its header 
+#               and plaintext
 # return      - Tuple of Sphinx packet with information for logging:
 #                   - packet.
 #                   - next Node to which packet should be forwarded.
@@ -72,7 +73,8 @@ def __genPckt(split       : str,
               size        : int,
               pki         : dict,
               users       : dict,
-              perLayerPKI : dict) -> tuple :
+              perLayerPKI : dict,
+              params      : SphinxParams) -> tuple :
 
     if ofType == 'LOOP_MIX':
         layer = pki[sender]['layer']
@@ -123,7 +125,6 @@ def __genPckt(split       : str,
     # Instantiate random message.
     message = __randomPlaintext(size) 
     
-    params        = SPHINX_PARAMS
     header, delta = create_forward_message(params, routing, keys, destination, message)
     packed        = pack_message(params, (header, delta))
 
@@ -142,8 +143,11 @@ PUBLIC
 # sender   - ID of sending entity either a user (u<######>) or mix (m<######>). mix accepted only 
 #            when a packet is of LOOP_MIX type.
 # ofType   - enum, 'LEGIT', 'DROP', 'LOOP' or 'LOOP_MIX'.
+# params   - an instance of SphinxParams object that defines the sphinx packet size, its header and
+#            plaintext
 # size     - number of plaintext bytes, can be different than default only if the message 
 #            is of LEGIT type.
+# maxSize  - The maximum size of sphinx packet plaintext in bytes. Static for the experiment.
 # users    - dictionary, maps user ID to its provider ID.
 # receiver - ID of receiving entity, only valid for LEGIT traffic, a user (u<######>). For other 
 #            types of the receiver is implicitly defined.
@@ -161,33 +165,35 @@ PUBLIC
 def generateMessage(pki      : dict,
                     sender   : str, 
                     ofType   : str,
-                    size     : int  = MAX_BODY,
+                    params   : SphinxParams,
+                    size     : int,
+                    maxSize  : int,
                     users    : dict = None,
-                    receiver : str  = None    ) -> list:
+                    receiver : str  = None) -> list:
 
     # Ensure constraints are satisfied.
     assert  ofType in ['LEGIT', 'DROP', 'LOOP', 'LOOP_MIX']
-    assert (ofType != 'LEGIT'    and size      ==     MAX_BODY) or (ofType == 'LEGIT'                         )
-    assert (ofType == 'LEGIT'    and receiver  is not None    ) or (ofType != 'LEGIT'    and receiver  is None)
-    assert (ofType != 'LOOP_MIX' and users     is not None    ) or (ofType == 'LOOP_MIX' and users     is None)
-    assert (ofType != 'LOOP_MIX' and sender[0] ==     'u'     ) or (ofType == 'LOOP_MIX' and sender[0] == 'm' )
+    assert (ofType != 'LEGIT'    and size      ==     maxSize) or (ofType == 'LEGIT'                         )
+    assert (ofType == 'LEGIT'    and receiver  is not None   ) or (ofType != 'LEGIT'    and receiver  is None)
+    assert (ofType != 'LOOP_MIX' and users     is not None   ) or (ofType == 'LOOP_MIX' and users     is None)
+    assert (ofType != 'LOOP_MIX' and sender[0] ==     'u'    ) or (ofType == 'LOOP_MIX' and sender[0] == 'm' )
     
     msgId      = str(ObjectId())
     splits     = []
-    numSplits  = int(ceil(size / MAX_BODY))
-    layeredPKI = __pkiToPerLayerPKI(pki)
+    layers     = __pkiToPerLayerPKI(pki)
+    numSplits  = int(ceil(size / maxSize))
 
     # x - split     - ordinal number for reordering purposes in string format (5 digit string 
     #                 <#####>).
     # y - splitSize - integer, the byte size of the packet to generate.
-    wrapper = lambda x, y : __genPckt(x, sender, ofType, receiver, msgId, y, pki, users, layeredPKI)
+    wrapper = lambda x, y : __genPckt(x, sender, ofType, receiver, msgId, y, pki, users, layers, params)
     
     for split in range(numSplits):
-        splitSize = MAX_BODY
+        splitSize = maxSize
         
         # Only the last packet in a too big message can have a non-default size.
         if split == numSplits-1:
-            splitSize = size - MAX_BODY * (numSplits-1)
+            splitSize = size - maxSize * (numSplits-1)
 
         splits += [wrapper("{:05d}".format(split), splitSize)]
         

@@ -12,9 +12,9 @@ from selectors              import EVENT_READ
 from selectors              import DefaultSelector
 from constants              import LAMBDAS
 from constants              import ID_TO_TYPE
-from constants              import SPHINX_PARAMS
 from numpy.random           import exponential
 from sphinxmix.SphinxNode   import sphinx_process
+from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import PFdecode
 from sphinxmix.SphinxClient import Dest_flag
 from sphinxmix.SphinxClient import Relay_flag
@@ -24,19 +24,32 @@ from sphinxmix.SphinxClient import receive_forward
 
 class Node:
     
-    # nodeId - 'm' for mix, 'p' for provider, followed by 6 digit ID string. providers are also 
-    # identified by being on the 0th layer.
-    def __init__(self, nodeId : str, layer : int):
-        self.__port         = 49152 + int(nodeId[1:])
-        self.__layer        = layer
-        self.__nodeId       = nodeId
-        self.__selector     = DefaultSelector()
-        self.__tagCache     = set()
+    # nodeId    - 'm' for mix, 'p' for provider, followed by 6 digit ID string. providers are also 
+    #             identified by being on the 0th layer.
+    # bodySize  - the size of plaintext in any mixnet packet in bytes.
+    # addBuffer - The excess of bytes that is needed to fully transfer a sphinx packet. Setting the
+    #             buffer size to bodySize + headerLen is not enough, about 40 additional bytes are
+    #             needed.
+    def __init__(self, 
+                 layer     : int, 
+                 nodeId    : str, 
+                 params    : SphinxParams, 
+                 bodySize  : int, 
+                 addBuffer : int):
+
+        self.__port      = 49152 + int(nodeId[1:])
+        self.__layer     = layer
+        self.__params    = params
+        self.__nodeId    = nodeId
+        self.__bodySize  = bodySize
+        self.__selector  = DefaultSelector()
+        self.__tagCache  = set()
+        self.__addBuffer = addBuffer
 
         # Generate key pair.
-        self.__secretKey    = SPHINX_PARAMS.group.gensecret()
-        self.__publicKey    = SPHINX_PARAMS.group.expon(SPHINX_PARAMS.group.g, [ self.__secretKey ])
-        self.__paramsDict   = { (SPHINX_PARAMS.max_len, SPHINX_PARAMS.m) : SPHINX_PARAMS }
+        self.__secretKey    = params.group.gensecret()
+        self.__publicKey    = params.group.expon(params.group.g, [ self.__secretKey ])
+        self.__paramsDict   = { (params.max_len, params.m) : params }
         self.__messageQueue = PriorityQueue()
         
         # Instantiate listener worker.
@@ -70,18 +83,18 @@ class Node:
     def __processPacket(self, conn : socket, mask):
         
         # 37 holds for body_len = 2 ** x for 8 <= x < 16.
-        data = conn.recv(SPHINX_PARAMS.max_len + SPHINX_PARAMS.m + 37)
+        data = conn.recv(self.__params.max_len + self.__params.m + self.__addBuffer)
 
         if data:
             unpacked = unpack_message(self.__paramsDict, data)
             header   = unpacked[1][0]
             delta    = unpacked[1][1]
 
-            processed = sphinx_process(SPHINX_PARAMS, self.__secretKey, header, delta)
+            processed = sphinx_process(self.__params, self.__secretKey, header, delta)
             tag       = processed[0]
             routing   = processed[1]
 
-            routing = PFdecode(SPHINX_PARAMS, routing)
+            routing = PFdecode(self.__params, routing)
             flag    = routing[0]
 
             # Check for tagging and replay attacks. Prevent repeating packets by keeping their tags
@@ -102,7 +115,7 @@ class Node:
                 # Prepare message for the relay, put it on sender's queue, and inform it about 
                 # sending time. Add logging info in the queueTuple to monitor traffic (routing info 
                 # contains ground truth).
-                packed      = pack_message(SPHINX_PARAMS, processed[2])
+                packed      = pack_message(self.__params, processed[2])
                 queueTuple  = (packed, nextNode, messageId, split, ofType)
                 sendingTime = time() + delay
 
@@ -112,7 +125,7 @@ class Node:
                 delta  = processed[2][1]
                 macKey = processed[3]
 
-                dest, _ = receive_forward(SPHINX_PARAMS, macKey, delta)
+                dest, _ = receive_forward(self.__params, macKey, delta)
 
                 destination = dest[0].decode('utf-8')
                 msgId       = dest[1]
@@ -143,7 +156,12 @@ class Node:
 
             # Node that is a mix generates LOOP_MIX decoy traffic periodically.
             elif self.__layer != 0 and sendingTime < time():
-                data = generateMessage(self.__pki, self.__nodeId, 'LOOP_MIX')[0]
+                data = generateMessage(self.__pki, 
+                                       self.__nodeId, 
+                                       'LOOP_MIX', 
+                                       self.__params, 
+                                       self.__bodySize, 
+                                       self.__bodySize)[0]
 
             if data is not None:
 
