@@ -2,6 +2,7 @@ from time                   import time
 from time                   import sleep
 from util                   import sendPacket
 from util                   import generateMessage
+from numpy                  import log2
 from queue                  import PriorityQueue
 from socket                 import socket
 from socket                 import AF_INET
@@ -36,6 +37,11 @@ class Node:
                  params    : SphinxParams, 
                  bodySize  : int, 
                  addBuffer : int):
+
+        # For entropy computation.
+        self.__h = 0
+        self.__k = 0
+        self.__l = 0
 
         self.__port      = 49152 + int(nodeId[1:])
         self.__layer     = layer
@@ -85,7 +91,7 @@ class Node:
         # 37 holds for body_len = 2 ** x for 8 <= x < 16.
         data = conn.recv(self.__params.max_len + self.__params.m + self.__addBuffer)
 
-        if data:
+        if data: 
             unpacked = unpack_message(self.__paramsDict, data)
             header   = unpacked[1][0]
             delta    = unpacked[1][1]
@@ -121,6 +127,8 @@ class Node:
 
                 self.__messageQueue.put((sendingTime, queueTuple))
 
+                self.__k += 1
+
             elif flag == Dest_flag:
                 delta  = processed[2][1]
                 macKey = processed[3]
@@ -145,8 +153,9 @@ class Node:
     def __sender(self,):
 
         # Instantiate state.
-        data        = None
-        sendingTime = time() + exponential(LAMBDAS['LOOP_MIX'])
+        data          = None
+        sendingTime   = time() + exponential(LAMBDAS['LOOP_MIX'])
+        generatedLoop = False
 
         while True:
 
@@ -162,6 +171,8 @@ class Node:
                                        self.__params, 
                                        self.__bodySize, 
                                        self.__bodySize)[0]
+                
+                generatedLoop = True
 
             if data is not None:
 
@@ -184,8 +195,26 @@ class Node:
                 data = None
 
                 # Sample the sending time of next LOOP_MIX decoy message.
-                if ofType == 'LOOP_MIX':
-                    sendingTime = time() + exponential(LAMBDAS['LOOP_MIX'])
+                if generatedLoop:
+                    sendingTime   = time() + exponential(LAMBDAS['LOOP_MIX'])
+                    generatedLoop = False
+
+                # On sending a message compute the entropy incrementally.
+                elif self.__k != 0 or self.__l != 0:
+                    denominator = (self.__k + self.__l)
+                    h_t         = self.__l * self.__h / denominator
+
+                    if self.__k != 0:
+                        h_t += self.__k * log2(self.__k) / denominator
+                        h_t -= self.__k / denominator * log2(self.__k / denominator)
+
+                    if self.__l != 0:
+                        h_t -= self.__l / denominator * log2(self.__l / denominator)
+
+                    self.__h = h_t
+                    self.__l = len(self.__messageQueue.queue)
+                    self.__k = 0
+
             else:
                 sleep(0.01)
 
