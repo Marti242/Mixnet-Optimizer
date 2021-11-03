@@ -1,6 +1,9 @@
 from json                   import load
+from time                   import sleep
 from node                   import Node
 from util                   import generateMessage
+from numpy                  import mean
+from queue                  import SimpleQueue
 from client                 import Client
 from logging                import INFO
 from logging                import basicConfig
@@ -32,6 +35,10 @@ def createMixnet(layers        : int,
     nodes   = []
     clients = []
     threads = []
+
+    # Synchronized queue through which clients and mixes inform the optimizer about the current 
+    # level of entropy or the sending and receiving times of LEGIT messages.
+    eventQueue = SimpleQueue()
 
     # Gather info on how many users should be registered in the simulation.
     userIds = []
@@ -99,7 +106,7 @@ def createMixnet(layers        : int,
     # Instantiate providers and add their info to PKI.
     for provider in range(providers):
         nodeId       = "p{:06d}".format(provider)
-        nodes       += [Node(0, nodeId, params, bodySize, addBuffer)]
+        nodes       += [Node(0, nodeId, params, bodySize, addBuffer, eventQueue)]
         pki[nodeId]  = nodes[-1].toPKIView()
 
     # Instantiate each mix and add their info to PKI.
@@ -110,8 +117,10 @@ def createMixnet(layers        : int,
             # provider numeration. Node IDs define listening ports, so overall node ID configuration
             # avoids port collisions.
             nodeId       = "m{:06d}".format((layer - 1) * nodesPerLayer + node + providers)
-            nodes       += [Node(layer, nodeId, params, bodySize, addBuffer)]
+            nodes       += [Node(layer, nodeId, params, bodySize, addBuffer, eventQueue)]
             pki[nodeId]  = nodes[-1].toPKIView()
+
+    threads += [Thread(target=observer, args=(pki, eventQueue))]
 
     # Propagate the global PKI state to each node.
     for node in nodes:
@@ -132,8 +141,10 @@ def createMixnet(layers        : int,
         # w - receiver, an ID of the receiving user for LEGIT traffic.
         usrMsgGen = lambda  x, y, z, w : generateMessage(pki, x, y, params, z, bodySize, users, w)
 
+        providerPort = pki[users[userId]]['port']
+
         # Instantiate the clients.
-        clients += [Client(userId, bodySize, mails, usrMsgGen, pki[users[userId]]['port'])]
+        clients += [Client(userId, bodySize, mails, usrMsgGen, providerPort, eventQueue)]
         threads += [Thread(target=clients[-1].start)]
 
     # TO DO:
@@ -147,3 +158,61 @@ def createMixnet(layers        : int,
     # Terminate the mixnet.
     for thread in threads:
         thread.join()
+
+# Worker that monitors the average level of entropy in the mixnet and computes the E2E latency
+# of LEGIT messages.
+def observer(pki : dict, eventQueue : SimpleQueue):
+
+
+    tracker = dict()
+
+    # Stores the E2E latencies of all of the LEGIT messages in the dataset.
+    latencies = []
+
+    # Maps the mixnet node to its current level of entropy.
+    entropies = dict([(nodeId, 0.) for nodeId in pki])
+
+    while True:
+        if not eventQueue.empty():
+            event = eventQueue.get()
+
+            # Entropy measurement is delivered.
+            if len(event) == 2 and type(event[1]) == float:
+                nodeId            = event[0]
+                entropy           = event[1]
+                entropies[nodeId] = entropy
+
+                # Compute & log the mean entropy across all the nodes.
+                print('entropy:', mean(list(entropies.values())))
+
+            # The LEGIT packet was delivered to user's provider.
+            elif len(event) == 2:
+                msgId = event[0]
+
+                # Check if it is the last split of the message. If yes then compute the overall E2E
+                # latency and log the mean latency of all LEGIT messages delivered so far.
+                if tracker[msgId][0] == 1:
+                    timeStr    = event[1]
+                    latencies += [float(timeStr) - float(tracker[msgId][1])]
+
+                    print('latency:', mean(latencies))                    
+                    del tracker[msgId]
+
+                # There are still packets of the given message that need to be delivered. Decrement
+                # the counter of packets waiting for delivery for the current message.
+                else:
+                    tracker[msgId][0] -= 1
+
+            # The optimizer is notified that a LEGIT packet was sent by a client.
+            else:
+                msgId = event[0]
+
+                # The optimizer records the new LEGIT message only once, together with number 
+                # of packets to which it was split and the time when first split was sent.
+                if msgId not in tracker:
+                    timeStr        = event[1]
+                    numSplits      = event[2]
+                    tracker[msgId] = [numSplits, timeStr]
+
+        else:
+            sleep(0.01)

@@ -3,6 +3,7 @@ from time                   import sleep
 from util                   import sendPacket
 from util                   import generateMessage
 from numpy                  import log2
+from queue                  import SimpleQueue
 from queue                  import PriorityQueue
 from socket                 import socket
 from socket                 import AF_INET
@@ -25,32 +26,39 @@ from sphinxmix.SphinxClient import receive_forward
 
 class Node:
     
-    # nodeId    - 'm' for mix, 'p' for provider, followed by 6 digit ID string. providers are also 
-    #             identified by being on the 0th layer.
-    # bodySize  - the size of plaintext in any mixnet packet in bytes.
-    # addBuffer - The excess of bytes that is needed to fully transfer a sphinx packet. Setting the
-    #             buffer size to bodySize + headerLen is not enough, about 40 additional bytes are
-    #             needed.
+    # nodeId     - 'm' for mix, 'p' for provider, followed by 6 digit ID string. providers are also 
+    #              identified by being on the 0th layer.
+    # bodySize   - the size of plaintext in any mixnet packet in bytes.
+    # addBuffer  - The excess of bytes that are needed to fully transfer a sphinx packet. Setting 
+    #              the buffer size to bodySize + headerLen is not enough, about 40 additional bytes 
+    #              are needed.
+    # eventQueue - queue synchronized with optimizer. It is used to inform the optimizer when 
+    #              a LEGIT message is received by the provider and ready for delivery to a user. The 
+    #              optimizer compares the time when the message is received with the time when 
+    #              it was sent to compute the E2E latency. Mixes, also inform the optimizer about 
+    #              their entropy.
     def __init__(self, 
-                 layer     : int, 
-                 nodeId    : str, 
-                 params    : SphinxParams, 
-                 bodySize  : int, 
-                 addBuffer : int):
+                 layer      : int, 
+                 nodeId     : str, 
+                 params     : SphinxParams, 
+                 bodySize   : int, 
+                 addBuffer  : int,
+                 eventQueue : SimpleQueue):
 
         # For entropy computation.
         self.__h = 0
         self.__k = 0
         self.__l = 0
 
-        self.__port      = 49152 + int(nodeId[1:])
-        self.__layer     = layer
-        self.__params    = params
-        self.__nodeId    = nodeId
-        self.__bodySize  = bodySize
-        self.__selector  = DefaultSelector()
-        self.__tagCache  = set()
-        self.__addBuffer = addBuffer
+        self.__port       = 49152 + int(nodeId[1:])
+        self.__layer      = layer
+        self.__params     = params
+        self.__nodeId     = nodeId
+        self.__bodySize   = bodySize
+        self.__selector   = DefaultSelector()
+        self.__tagCache   = set()
+        self.__addBuffer  = addBuffer
+        self.__eventQueue = eventQueue
 
         # Generate key pair.
         self.__secretKey    = params.group.gensecret()
@@ -143,6 +151,10 @@ class Node:
 
                 # Log packet delivery.
                 info('%s %s %s %s %s %s', timeStr, self.__nodeId, destination, msgId, split, ofType)
+
+                # Inform the optimizer that a LEGIT packet is ready for the delivery to a user.
+                if ofType == 'LEGIT':
+                    self.__eventQueue.put((msgId, timeStr))
         else:
 
             # Close connection.
@@ -210,6 +222,9 @@ class Node:
 
                     if self.__l != 0:
                         h_t -= self.__l / denominator * log2(self.__l / denominator)
+
+                    # Inform the optimizer about the current entropy level.
+                    self.__eventQueue.put((self.__nodeId, float(h_t)))
 
                     self.__h = h_t
                     self.__l = len(self.__messageQueue.queue)

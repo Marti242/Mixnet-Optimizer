@@ -2,6 +2,7 @@ from time         import time
 from time         import sleep
 from util         import sendPacket
 from queue        import Queue
+from queue        import SimpleQueue
 from queue        import PriorityQueue
 from typing       import Callable
 from logging      import info
@@ -25,15 +26,19 @@ class Client:
     # msgGenerator - wrapper function for generation messages encapsulated in Sphinx packets 
     #                implicitly gives the client access to the PKI info.
     # providerPort - Port at which user's provider listens for a connection.
+     # eventQueue  - queue synchronized with optimizer. It is used to inform the optimizer when 
+     #               a LEGIT message is sent. This information is used for latency computation.
     def __init__(self, 
                  userId       : str, 
                  bodySize     : int, 
                  rawMails     : list, 
                  msgGenerator : Callable, 
-                 providerPort : int):
+                 providerPort : int,
+                 eventQueue   : SimpleQueue):
         self.__userId       = userId
         self.__bodySize     = bodySize
         self.__rawMails     = PriorityQueue()
+        self.__eventQueue   = eventQueue
         self.__msgGenerator = msgGenerator
         self.__messageQueue = Queue()
         self.__providerPort = providerPort
@@ -48,8 +53,9 @@ class Client:
     def start(self,):
 
         # Initialize state. updateType informs what kind of packet was sent and which timer should 
-        # be reset. 
+        # be reset. legitSend indicates whether the client has sent a LEGIT packet.
         data       = None
+        legitSend  = False
         updateType = None
 
         # Dictionary of times at which the next packet of a given type should be emitted. 
@@ -69,11 +75,12 @@ class Client:
                 splits = self.__msgGenerator(self.__userId, 'LEGIT', mail['size'], mail['receiver'])
 
                 for split in splits:
-                    self.__messageQueue.put_nowait(split)
+                    self.__messageQueue.put_nowait(split + (len(splits), ))
 
             # There is a LEGIT message to send.
             if not self.__messageQueue.empty() and timers['LEGIT'] < time():
                 data       = self.__messageQueue.get_nowait()
+                legitSend  = True
                 updateType = 'LEGIT'
 
             # There is no LEGIT message to send, so send a DROP packet instead and reset the LEGIT
@@ -110,6 +117,12 @@ class Client:
 
                 # Reset the timer for a given message type.
                 timers[updateType] = time() + exponential(LAMBDAS[updateType])
+
+                # When LEGIT message was sent inform the optimizer about it through eventQueue.
+                if legitSend:
+                    self.__eventQueue.put((msgId, timeStr, data[5]))
+
+                    legitSend = False
 
                 # Reset the state.
                 data       = None
