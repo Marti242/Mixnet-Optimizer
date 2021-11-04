@@ -6,7 +6,6 @@ from socket                 import SOCK_STREAM
 from petlib.bn              import Bn
 from petlib.ec              import EcPt
 from petlib.ec              import EcGroup
-from constants              import LAMBDAS
 from constants              import TYPE_TO_ID
 from constants              import ALL_CHARACTERS
 from numpy.random           import choice
@@ -52,6 +51,7 @@ def __pkiToPerLayerPKI(pki : dict) -> dict:
 # messageId   - message ID - string in the pymongo bson ObjectId format.
 # size        - number of plaintext bytes, should be different than default only if the message 
 #               is of LEGIT type.
+# delayMean   - Mean packet delay, mixnet parameter.
 # pki         - dictionary maps node ID (mix or provider) to its PKI info (listening port, public 
 #               key, layer).
 # users       - dictionary, maps user ID to its provider ID.
@@ -71,6 +71,7 @@ def __genPckt(split       : str,
               receiver    : str,
               messageId   : str,
               size        : int,
+              delayMean   : float,
               pki         : dict,
               users       : dict,
               perLayerPKI : dict,
@@ -120,7 +121,7 @@ def __genPckt(split       : str,
     nencWrapper = lambda dest, delay: Nenc((dest, delay, messageId, split, TYPE_TO_ID[ofType]))
 
     # Add routing information for each mix, sample delays.
-    routing = [nencWrapper(dest, exponential(LAMBDAS['DELAY'])) for dest in path]
+    routing = [nencWrapper(dest, exponential(delayMean)) for dest in path]
 
     # Instantiate random message.
     message = __randomPlaintext(size) 
@@ -138,38 +139,40 @@ PUBLIC
 # sending through a mix network. Responsible for splitting a message into chunks. All chunks/splits 
 # of the same message have the same message ID, message ID together with split number must be used 
 # to identify a packet uniquely sole message ID is not enough.
-# pki      - dictionary maps node ID (mix or provider) to its PKI info (listening port, public key, 
-#            layer).
-# sender   - ID of sending entity either a user (u<######>) or mix (m<######>). mix accepted only 
-#            when a packet is of LOOP_MIX type.
-# ofType   - enum, 'LEGIT', 'DROP', 'LOOP' or 'LOOP_MIX'.
-# params   - an instance of SphinxParams object that defines the sphinx packet size, its header and
-#            plaintext
-# size     - number of plaintext bytes, can be different than default only if the message 
-#            is of LEGIT type.
-# maxSize  - The maximum size of sphinx packet plaintext in bytes. Static for the experiment.
-# users    - dictionary, maps user ID to its provider ID.
-# receiver - ID of receiving entity, only valid for LEGIT traffic, a user (u<######>). For other 
-#            types of the receiver is implicitly defined.
-# return   - a list of packets with logging data. If the size of the message is larger than MAX_BODY
-#            then it is split. Each split is encapsulated in a separate Sphinx packet. Thus, return 
-#            a message as a set of packets. When the type of the message is different than LEGIT 
-#            always only one packet in a list is returned. Only for LEGIT, more packets can be 
-#            returned. A single packet is a tuple:
-#                - packet.
-#                - next Node to which packet should be forwarded.
-#                - message ID - string in the pymongo ObjectId format.
-#                - split - ordinal number for reordering the purpose in string format (5 digit 
-#                  string <#####>).
-#                - type of message.
-def generateMessage(pki      : dict,
-                    sender   : str, 
-                    ofType   : str,
-                    params   : SphinxParams,
-                    size     : int,
-                    maxSize  : int,
-                    users    : dict = None,
-                    receiver : str  = None) -> list:
+# pki       - dictionary maps node ID (mix or provider) to its PKI info (listening port, public key, 
+#             layer).
+# sender    - ID of sending entity either a user (u<######>) or mix (m<######>). mix accepted only 
+#             when a packet is of LOOP_MIX type.
+# ofType    - enum, 'LEGIT', 'DROP', 'LOOP' or 'LOOP_MIX'.
+# params    - an instance of SphinxParams object that defines the sphinx packet size, its header and
+#             plaintext
+# size      - number of plaintext bytes, can be different than default only if the message 
+#             is of LEGIT type.
+# maxSize   - The maximum size of sphinx packet plaintext in bytes. Static for the experiment.
+# delayMean - Mean packet delay, mixnet parameter.
+# users     - dictionary, maps user ID to its provider ID.
+# receiver  - ID of receiving entity, only valid for LEGIT traffic, a user (u<######>). For other 
+#             types of the receiver is implicitly defined.
+# return    - a list of packets with logging data. If the size of the message is larger than 
+#             MAX_BODY then it is split. Each split is encapsulated in a separate Sphinx packet. 
+#             Thus, return a message as a set of packets. When the type of the message is different 
+#             than LEGIT always only one packet in a list is returned. Only for LEGIT, more packets 
+#             can be returned. A single packet is a tuple:
+#                 - packet.
+#                 - next Node to which packet should be forwarded.
+#                 - message ID - string in the pymongo ObjectId format.
+#                 - split - ordinal number for reordering the purpose in string format (5 digit 
+#                   string <#####>).
+#                 - type of message.
+def generateMessage(pki       : dict,
+                    sender    : str, 
+                    ofType    : str,
+                    params    : SphinxParams,
+                    size      : int,
+                    maxSize   : int,
+                    delayMean : float,
+                    users     : dict = None,
+                    receiver  : str  = None) -> list:
 
     # Ensure constraints are satisfied.
     assert  ofType in ['LEGIT', 'DROP', 'LOOP', 'LOOP_MIX']
@@ -186,7 +189,7 @@ def generateMessage(pki      : dict,
     # x - split     - ordinal number for reordering purposes in string format (5 digit string 
     #                 <#####>).
     # y - splitSize - integer, the byte size of the packet to generate.
-    wrapper = lambda x, y : __genPckt(x, sender, ofType, receiver, msgId, y, pki, users, layers, params)
+    wrapper = lambda x, y : __genPckt(x, sender, ofType, receiver, msgId, y, delayMean, pki, users, layers, params)
     
     for split in range(numSplits):
         splitSize = maxSize
@@ -200,7 +203,11 @@ def generateMessage(pki      : dict,
     return splits
 
 def sendPacket(packet : bytes, nextAddress : int):
-    with socket(AF_INET, SOCK_STREAM) as client:
-        client.connect(('127.0.0.1', nextAddress))
-        client.sendall(packet)
-        client.close()
+    try:
+        with socket(AF_INET, SOCK_STREAM) as client:
+            client.connect(('127.0.0.1', nextAddress))
+            client.sendall(packet)
+            client.close()
+    except:
+        print('ERROR')
+        pass

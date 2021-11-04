@@ -23,20 +23,27 @@ class Client:
     #                    - receiver - the ID of a single receiving user. The emails that had 
     #                      multiple receivers were split into emails of the same sizes, sending 
     #                      times and senders, but one receiver per email.
+    # cmdQueue     - queue synchronized with the optimizer. The optimizer uses it to propagate the 
+    #                mixnet parameter updates across the network. It can also be used to send 
+    #                an empty command that initiates the graceful termination of the mixnet.
+    # eventQueue   - queue synchronized with optimizer. It is used to inform the optimizer when 
+    #                a LEGIT message is sent. This information is used for latency computation.
+    # providerPort - Port at which user's provider listens for a connection.
     # msgGenerator - wrapper function for generation messages encapsulated in Sphinx packets 
     #                implicitly gives the client access to the PKI info.
-    # providerPort - Port at which user's provider listens for a connection.
-     # eventQueue  - queue synchronized with optimizer. It is used to inform the optimizer when 
-     #               a LEGIT message is sent. This information is used for latency computation.
     def __init__(self, 
                  userId       : str, 
                  bodySize     : int, 
-                 rawMails     : list, 
-                 msgGenerator : Callable, 
+                 rawMails     : list,
+                 cmdQueue     : PriorityQueue,
+                 eventQueue   : SimpleQueue,
                  providerPort : int,
-                 eventQueue   : SimpleQueue):
+                 msgGenerator : Callable):
         self.__userId       = userId
+        self.__lastCmd      = 0.
+        self.__lambdas      = LAMBDAS
         self.__bodySize     = bodySize
+        self.__cmdQueue     = cmdQueue
         self.__rawMails     = PriorityQueue()
         self.__eventQueue   = eventQueue
         self.__msgGenerator = msgGenerator
@@ -62,9 +69,9 @@ class Client:
         timers = dict()
 
         # Sample the initial sending times for messages of a given type.
-        timers['DROP' ] = time() + exponential(LAMBDAS['DROP'])
-        timers['LOOP' ] = time() + exponential(LAMBDAS['LOOP'])
-        timers['LEGIT'] = time() + exponential(LAMBDAS['LEGIT'])
+        timers['DROP' ] = time() + exponential(self.__lambdas['DROP'])
+        timers['LOOP' ] = time() + exponential(self.__lambdas['LOOP'])
+        timers['LEGIT'] = time() + exponential(self.__lambdas['LEGIT'])
 
         while True:
 
@@ -72,7 +79,7 @@ class Client:
             # packet and put on sending queue that's probed via Poisson process.
             if not self.__rawMails.empty() and self.__rawMails.queue[0][0] < time():
                 mail   = self.__rawMails.get_nowait()[1]
-                splits = self.__msgGenerator(self.__userId, 'LEGIT', mail['size'], mail['receiver'])
+                splits = self.__msgGenerator(self.__userId, 'LEGIT', mail['size'], self.__lambdas['DELAY'], mail['receiver'])
 
                 for split in splits:
                     self.__messageQueue.put_nowait(split + (len(splits), ))
@@ -86,17 +93,17 @@ class Client:
             # There is no LEGIT message to send, so send a DROP packet instead and reset the LEGIT
             # traffic timer.
             elif self.__messageQueue.empty() and timers['LEGIT'] < time():
-                data       = self.__msgGenerator(self.__userId, 'DROP', self.__bodySize, None)[0]
+                data       = self.__msgGenerator(self.__userId, 'DROP', self.__bodySize, self.__lambdas['DELAY'], None)[0]
                 updateType = 'LEGIT'
 
             # Generate DROP decoy packet.
             elif timers['DROP'] < time():
-                data       = self.__msgGenerator(self.__userId, 'DROP', self.__bodySize, None)[0]
+                data       = self.__msgGenerator(self.__userId, 'DROP', self.__bodySize, self.__lambdas['DELAY'], None)[0]
                 updateType = 'DROP'
 
             # Generate LOOP decoy packet.
             elif timers['LOOP'] < time():
-                data       = self.__msgGenerator(self.__userId, 'LOOP', self.__bodySize, None)[0]
+                data       = self.__msgGenerator(self.__userId, 'LOOP', self.__bodySize, self.__lambdas['DELAY'], None)[0]
                 updateType = 'LOOP'
 
             if data is not None:
@@ -116,7 +123,7 @@ class Client:
                 info('%s %s %s %s %s %s', timeStr, self.__userId, nextNode, msgId, split, ofType)
 
                 # Reset the timer for a given message type.
-                timers[updateType] = time() + exponential(LAMBDAS[updateType])
+                timers[updateType] = time() + exponential(self.__lambdas[updateType])
 
                 # When LEGIT message was sent inform the optimizer about it through eventQueue.
                 if legitSend:
@@ -127,5 +134,25 @@ class Client:
                 # Reset the state.
                 data       = None
                 updateType = None
+
+            if not self.__cmdQueue.empty():
+                cmd = self.__cmdQueue.get()
+
+                # Empty command gracefully terminates the worker.
+                if len(cmd) == 0:
+                    self.__cmdQueue.put([])
+                    break
+
+                # Update the mixnet parameters.
+                elif self.__lastCmd < cmd[0]:
+                    self.__lambdas = cmd[1][1]
+                    self.__lastCmd = cmd[0]
+
+                    cmd[1][0] -= 1
+                    
+                # When the counter reaches 0, all workers have successfully updated their 
+                # parameters.
+                if cmd[1][0] > 0:
+                    self.__cmdQueue.put(cmd)
             else:
                 sleep(0.01)

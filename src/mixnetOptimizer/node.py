@@ -29,6 +29,9 @@ class Node:
     # nodeId     - 'm' for mix, 'p' for provider, followed by 6 digit ID string. providers are also 
     #              identified by being on the 0th layer.
     # bodySize   - the size of plaintext in any mixnet packet in bytes.
+    # cmdQueue   - queue synchronized with the optimizer. The optimizer uses it to propagate the 
+    #              mixnet parameter updates across the network. It can also be used to send an empty 
+    #              command that initiates the graceful termination of the mixnet.
     # addBuffer  - The excess of bytes that are needed to fully transfer a sphinx packet. Setting 
     #              the buffer size to bodySize + headerLen is not enough, about 40 additional bytes 
     #              are needed.
@@ -42,6 +45,7 @@ class Node:
                  nodeId     : str, 
                  params     : SphinxParams, 
                  bodySize   : int, 
+                 cmdQueue   : PriorityQueue,
                  addBuffer  : int,
                  eventQueue : SimpleQueue):
 
@@ -54,7 +58,10 @@ class Node:
         self.__layer      = layer
         self.__params     = params
         self.__nodeId     = nodeId
+        self.__lambdas    = LAMBDAS
+        self.__lastCmd    = 0.
         self.__bodySize   = bodySize
+        self.__cmdQueue   = cmdQueue
         self.__selector   = DefaultSelector()
         self.__tagCache   = set()
         self.__addBuffer  = addBuffer
@@ -166,7 +173,7 @@ class Node:
 
         # Instantiate state.
         data          = None
-        sendingTime   = time() + exponential(LAMBDAS['LOOP_MIX'])
+        sendingTime   = time() + exponential(self.__lambdas['LOOP_MIX'])
         generatedLoop = False
 
         while True:
@@ -182,7 +189,8 @@ class Node:
                                        'LOOP_MIX', 
                                        self.__params, 
                                        self.__bodySize, 
-                                       self.__bodySize)[0]
+                                       self.__bodySize,
+                                       self.__lambdas['DELAY'])[0]
                 
                 generatedLoop = True
 
@@ -208,7 +216,7 @@ class Node:
 
                 # Sample the sending time of next LOOP_MIX decoy message.
                 if generatedLoop:
-                    sendingTime   = time() + exponential(LAMBDAS['LOOP_MIX'])
+                    sendingTime   = time() + exponential(self.__lambdas['LOOP_MIX'])
                     generatedLoop = False
 
                 # On sending a message compute the entropy incrementally.
@@ -230,6 +238,25 @@ class Node:
                     self.__l = len(self.__messageQueue.queue)
                     self.__k = 0
 
+            # Empty command gracefully terminates the worker.
+            if not self.__cmdQueue.empty():
+                cmd = self.__cmdQueue.get()
+
+                if len(cmd) == 0:
+                    self.__cmdQueue.put([])
+                    break
+
+                # Update the mixnet parameters.
+                elif self.__lastCmd < cmd[0]:
+                    self.__lambdas = cmd[1][1]
+                    self.__lastCmd = cmd[0]
+
+                    cmd[1][0] -= 1
+                    
+                # When the counter reaches 0, all workers have successfully updated their 
+                # parameters.
+                if cmd[1][0] > 0:
+                    self.__cmdQueue.put(cmd)
             else:
                 sleep(0.01)
 
@@ -244,9 +271,16 @@ class Node:
         
         # Serve multiple connections.
         while True:
-            events = self.__selector.select()
+            events = self.__selector.select(timeout=LAMBDAS['DELAY'])
             
             for key, mask in events:
                 callback = key.data
                 
                 callback(key.fileobj, mask)
+
+            # Gracefully shut down the mix. sender worker propagates the close command.
+            if not nodeSender.is_alive():
+                self.__selector.close()
+                break
+
+        nodeSender.join()
