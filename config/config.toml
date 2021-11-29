@@ -1,0 +1,23 @@
+lag            = 10
+layers         = 2
+logFile        = "../../logs/logs.log"
+bodySize       = 5436
+tracesFile     = "../../data/sample.json"
+numProviders   = 2
+nodesPerLayer  = 2
+loopMixEntropy = true
+
+[lambdas]
+LOOP     = 7.879036505057893
+DROP     = 7.879036505057893
+LEGIT    = 7.879036505057893
+DELAY    = 7.879036505057893
+LOOP_MIX = 7.879036505057893
+
+[priorities]
+RAW      = 2
+LOOP     = 5
+DROP     = 4
+LEGIT    = 1
+DELAY    = 3
+LOOP_MIX = 6
