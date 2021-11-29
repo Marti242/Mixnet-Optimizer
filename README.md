@@ -1,4 +1,10 @@
+## ❗❗❗ For the new project version, please check the `optimizer-0.0.2` branch. Documentation is coming soon.
+
+---
+
 Minimal implementation of the [Loopix mix network design](https://www.usenix.org/conference/usenixsecurity17/technical-sessions/presentation/piotrowska) for simulating traffic through the network and optimizing its parameters.
+
+---
 
 # 📧 How to run
 
@@ -39,6 +45,8 @@ INFO:root:<timestamp> <senderId> <receiverId> <messageId> <chunkNumber> <traffic
 - `chunkNumber` - an ordinal identifier that helps to rebuild message split into chunks back to original.
 - `trafficType` - the type of the sent packet, `LEGIT`, `DROP`, `LOOP` or `LOOP_MIX`.
 
+---
+
 A sample of logging format:
 
 ```
@@ -48,4 +56,4 @@ INFO:root:1632036004.1971738 p000000 m000002 6146e479db3de34f0b4b2801 00000 LOOP
 INFO:root:1632036003.0823636 m000002 m000002 6146e486db3de34f0b4b2813 00000 LOOP_MIX
 ```
 
-**TO DO: ADD ASUMPTIOS & implementation details**
+---
