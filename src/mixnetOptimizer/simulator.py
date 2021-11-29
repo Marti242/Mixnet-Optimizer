@@ -214,39 +214,30 @@ class Simulator:
                   size      : int) -> tuple :
 
         if ofType == 'LOOP_MIX':
-            layer = self.__pki[sender]['layer']
             path  = []
+            layer = self.__pki[sender]['layer']
 
-            # Randomly sample one mix per each layer supersisiding mix layer.
             for nextLayer in range(layer + 1, len(self.__perLayerPKI)):
                 path += rand_subset(self.__perLayerPKI[nextLayer], 1)
 
-            # Randomly sample a provider and one mix per each layer preceding mix layer.
             for nextLayer in range(layer):
                 path += rand_subset(self.__perLayerPKI[nextLayer], 1)
 
-            # Message should return back to sending mix.
             path        += [sender]
             destination  = bytes(sender, encoding='utf-8')
         else:
-            senderProvider = self.__users[sender]
             path           = []
+            senderProvider = self.__users[sender]
 
-            # Sample random path through mix (one mix per each layer).
             for layer in range(1, len(self.__perLayerPKI)):
                 path += rand_subset(self.__perLayerPKI[layer], 1)
-
             if ofType == 'LEGIT':
                 destination      = bytes(receiver, encoding='utf-8')
                 receiverProvider = self.__users[receiver]
             elif ofType == 'DROP':
-
-                # Sample a random provider and direct the DROP message to it.
                 receiverProvider = rand_subset(self.__perLayerPKI[0], 1)[0]
                 destination      = bytes(receiverProvider, encoding='utf-8')
             elif ofType == 'LOOP':
-
-                # Direct the LOOP message back to the sender's provider.
                 destination      = bytes(sender, encoding='utf-8')
                 receiverProvider = senderProvider
 
@@ -256,7 +247,6 @@ class Simulator:
         destination = (destination, messageId, split, TYPE_TO_ID[ofType])
         nencWrapper = lambda dest, delay: Nenc((dest, delay, messageId, split, TYPE_TO_ID[ofType]))
 
-        # Add routing information for each mix, sample delays, track the expected packet delay.
         routing       = []
         expectedDelay = 0
 
@@ -265,7 +255,6 @@ class Simulator:
             routing       += [nencWrapper(dest, delay)]
             expectedDelay += delay
 
-        # Instantiate random message.
         message = self.__randomPlaintext(size) 
         
         header, delta = create_forward_message(self.__params, routing, keys, destination, message)
@@ -274,8 +263,6 @@ class Simulator:
         return packed, path[0], messageId, split, ofType, expectedDelay
 
     def __generateMessage(self, sender : str, ofType : str, size : int, receiver : str = None) -> list:
-
-        # Ensure constraints are satisfied.
         assert  ofType in ['LEGIT', 'DROP', 'LOOP', 'LOOP_MIX']
         assert (ofType != 'LEGIT'    and size      ==     self.__bodySize) or (ofType == 'LEGIT'                               )
         assert (ofType == 'LEGIT'    and receiver  is not None           ) or (ofType != 'LEGIT'    and receiver  is None      )
@@ -283,17 +270,12 @@ class Simulator:
         
         msgId     = str(ObjectId())
         splits    = []
+        wrapper   = lambda x, y : self.__genPckt(x, sender, ofType, receiver, msgId, y)
         numSplits = int(ceil(size / self.__bodySize))
-
-        # x - split     - ordinal number for reordering purposes in string format (5 digit string 
-        #                 <#####>).
-        # y - splitSize - integer, the byte size of the packet to generate.
-        wrapper = lambda x, y : self.__genPckt(x, sender, ofType, receiver, msgId, y)
         
         for split in range(numSplits):
             splitSize = self.__bodySize
             
-            # Only the last packet in a too big message can have a non-default size.
             if split == numSplits-1:
                 splitSize = size - self.__bodySize * (numSplits-1)
 
@@ -351,7 +333,6 @@ class Simulator:
 
         info('%s %s %s %s %s %s', timeStr, sender, nextNode, msgId, split, actualType)
 
-        # Inform about legit sending
         if ofType == 'LEGIT' and actualType == 'LEGIT':
             numSplits = data[7]
 
@@ -445,11 +426,11 @@ class Simulator:
                     latencies = [t[2] for t in self.__latencyTracker.values() if t[2] is not None]
 
                     print('latency:', mean(latencies), len(latencies))
-
-                # There are still packets of the given message that need to be delivered. Decrement
-                # the counter of packets waiting for delivery for the current message.
                 else:
                     self.__latencyTracker[msgId][0] -= 1
+
+        for event in self.__messageQueue.queue:
+            self.__messageQueue.cancel(event)
 
         self.__cmdQueue.put(None)
 
