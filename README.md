@@ -1,4 +1,4 @@
-## ❗❗❗ For the new project version, please check the `optimizer-0.0.2` branch. Documentation is coming soon.
+## ❗❗❗ For the new project version, please check the `optimizer-0.0.2` branch. ❗❗❗
 
 ---
 
