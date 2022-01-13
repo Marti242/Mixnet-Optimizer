@@ -1,11 +1,14 @@
-lag            = 10
-layers         = 2
-logFile        = "../../logs/logs.log"
-bodySize       = 5436
-tracesFile     = "../../data/sample.json"
-numProviders   = 2
-nodesPerLayer  = 2
-loopMixEntropy = true
+lag              = 10.0
+layers           = 2
+rng_seed         = 0
+log_file         = "../../logs/logs.log"
+body_size        = 5436
+start_time       = 1575154800.901652
+traces_file      = "../../data/sample.json"
+num_providers    = 2
+nodes_per_layer  = 2
+loop_mix_entropy = true
+num_senders      = 1
 
 [lambdas]
 LOOP     = 7.879036505057893
@@ -13,11 +16,3 @@ DROP     = 7.879036505057893
 LEGIT    = 7.879036505057893
 DELAY    = 7.879036505057893
 LOOP_MIX = 7.879036505057893
-
-[priorities]
-RAW      = 2
-LOOP     = 5
-DROP     = 4
-LEGIT    = 1
-DELAY    = 3
-LOOP_MIX = 6

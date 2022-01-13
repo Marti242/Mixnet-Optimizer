@@ -1,441 +1,458 @@
 import json
+
+from time import time
+from queue import Queue
+from string import digits
+from string import punctuation
+from string import ascii_letters
+from logging import info
+from logging import INFO
+from logging import basicConfig
+from threading import Thread
+from collections import Counter
+
 import toml
 
-from node                   import Node
-from time                   import time
-from time                   import sleep
-from bson                   import ObjectId
-from numpy                  import ceil
-from numpy                  import log2
-from numpy                  import mean
-from sched                  import scheduler
-from queue                  import Queue
-from socket                 import socket
-from socket                 import AF_INET
-from socket                 import SOCK_STREAM
-from string                 import digits
-from string                 import punctuation
-from string                 import ascii_letters
-from logging                import info
-from logging                import INFO
-from logging                import basicConfig
-from petlib.bn              import Bn
-from petlib.ec              import EcPt
-from petlib.ec              import EcGroup
-from threading              import Thread
-from numpy.random           import choice
-from numpy.random           import randint
-from numpy.random           import exponential
+from node import Node
+from util import send_packet
+from bson import ObjectId
+from simpy import Environment
+from numpy import ceil
+from numpy import array
+from numpy.random import RandomState
 from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import Nenc
 from sphinxmix.SphinxClient import rand_subset
 from sphinxmix.SphinxClient import pack_message
 from sphinxmix.SphinxClient import create_forward_message
 
-TYPE_TO_ID     = {'LEGIT': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
+TYPE_TO_ID = {'LEGIT': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
 ALL_CHARACTERS = list(ascii_letters + digits + punctuation + ' ')
 
+
 class Simulator:
+    """SIMULATOR"""
 
-    def __init__(self, configFile : str):
-        assert configFile[-5:]  == '.toml', 'Config file must be in TOML format.'  
+    def __init__(self, config_file: str, notebook: bool = False):
+        assert config_file[-5:] == '.toml', 'Config file must be in TOML format'
 
-        with open(configFile, 'r') as file:
+        with open(config_file, 'r', encoding='utf-8') as file:
             config = toml.load(file)
 
-            file.close()
+        assert 'log_file' in config, 'Logging file must be specified'
+        assert 'traces_file' in config, 'Traces file must be specified'
+        assert isinstance(config['log_file'], str), 'Path to log file must be string'
+        assert isinstance(config['traces_file'], str), 'Path to traces file must be string'
+        assert config['traces_file'][-5:] == '.json', 'Traces file must be in JSON format'
 
-        assert 'logFile'    in config,                                                                                                                                'Logging file must be specified.'
-        assert 'tracesFile' in config,                                                                                                                                'Traces file must be specified.'
-        assert type(config['logFile'   ]) == str,                                                                                                                     'Path to log file must be a string.'
-        assert type(config['tracesFile']) == str,                                                                                                                     'Path to traces file must be a string.'
-        assert config['tracesFile'][-5:]  == '.json',                                                                                                                 'Traces file must be in JSON format.'
-        assert 'bodySize'       not in config or  type(config['layers'        ]) == int,                                                                              'layers must be an integer.'
-        assert 'maxSimTime'     not in config or  type(config['maxSimTime'    ]) == float,                                                                            'maxSimTime must be a float.' 
-        assert 'numProviders'   not in config or  type(config['numProviders'  ]) == int,                                                                              'numProviders must be an integer.'
-        assert 'nodesPerLayer'  not in config or  type(config['nodesPerLayer' ]) == int,                                                                              'nodesPerLayer must be an integer.'
-        assert 'loopMixEntropy' not in config or  type(config['loopMixEntropy']) == bool,                                                                             'loopMixEntropy must be a boolean.'
-        assert 'lambdas'        not in config or (type(config['lambdas'       ]) == dict and all([type(value) == float for value in config['lambdas'   ].values()])), 'All Lambads must be float.'
-        assert 'priorities'     not in config or (type(config['priorities'    ]) == dict and all([type(value) == int   for value in config['priorities'].values()])), 'All priorities must be int.'
-
-        layers                = 2
-        self.__lag            = 10
-        numProviders          = 2
-        nodesPerLayer         = 2
-        self.__lambdas        = dict()
-        self.__bodySize       = 5436
-        self.__priorities     = dict()
-        self.__loopMixEntropy = False
+        layers = 2
+        self.__rng = RandomState()
+        self.__lag = 10
+        num_providers = 2
+        self.__lambdas = {}
+        nodes_per_layer = 2
+        self.__body_size = 5436
+        self.__start_time = 0
+        self.__loop_mix_entropy = False
 
         if 'lag' in config:
+            assert isinstance(config['lag'], float), 'lag must be float'
+
             self.__lag = config['lag']
 
         if 'layers' in config:
+            assert isinstance(config['layers'], int), 'layers must be int'
+
             layers = config['layers']
 
         if 'lambdas' in config:
+            assert isinstance(config['lambdas'], dict), 'lambdas must be dict'
+
+            lambdas = [isinstance(value, float) for value in config['lambdas'].values()]
+
+            assert all(lambdas), 'All lambdas must be float.'
+
             self.__lambdas = config['lambdas']
 
-        if 'bodySize' in config:
-            self.__bodySize = config['bodySize']
+        if 'rng_seed' in config:
+            assert isinstance(config['rng_seed'], int), 'rng_seed must be int'
 
-        if 'priorities' in config:
-            self.__priorities = config['priorities']
+            self.__rng = RandomState(config['rng_seed'])
 
-        if 'numProviders' in config:
-            numProviders = config['numProviders']
+        if 'body_size' in config:
+            assert isinstance(config['body_size'], int), 'body_size must be int'
 
-        if 'nodesPerLayer' in config:
-            nodesPerLayer = config['nodesPerLayer']
+            self.__body_size = config['body_size']
 
-        if 'loopMixEntropy' in config:
-            nodesPerLayer = config['loopMixEntropy']
+        if 'start_time' in config:
+            assert isinstance(config['start_time'], float), 'start_time must be float'
 
-        basicConfig(filename=config['logFile'], level=INFO, encoding='utf-8')
+            self.__start_time = config['start_time']
 
-        with open(config['tracesFile'], 'r') as file:
+        if 'num_providers' in config:
+            assert isinstance(config['num_providers'], int), 'num_providers must be int'
+
+            num_providers = config['num_providers']
+
+        if 'nodes_per_layer' in config:
+            assert isinstance(config['nodes_per_layer'], int), 'nodes_per_layer must be int'
+
+            nodes_per_layer = config['nodes_per_layer']
+
+        if 'loop_mix_entropy' in config:
+            assert isinstance(config['loop_mix_entropy'], bool), 'loop_mix_entropy must be bool'
+
+            self.__loop_mix_entropy = config['loop_mix_entropy']
+
+        basicConfig(filename=config['log_file'], level=INFO, encoding='utf-8')
+
+        with open(config['traces_file'], 'r', encoding='utf-8') as file:
             self.__traces = json.load(file)
 
-            file.close()
-
-        self.__maxSimTime = self.__traces[-1]['time'] * 2 + self.__lag
-
-        if 'maxSimTime' in config:
-            self.__maxSimTime = config['maxSimTime']
-
-        self.__users   = []
+        self.__users = []
         self.__senders = []
 
         for mail in self.__traces:
-            self.__users   += [mail['sender'], mail['receiver']]
+            self.__users += [mail['sender'], mail['receiver']]
             self.__senders += [mail['sender']]
 
-        self.__users   = dict([(user, None) for user in sorted(list(set(self.__users)))])
+        self.__users = {user: None for user in sorted(list(set(self.__users)))}
         self.__senders = sorted(list(set(self.__senders)))
 
-        userIds           = list(self.__users.keys())
-        numUsers          = len(self.__users)
-        userIdxToProvider = randint(0, high=numProviders, size=numUsers)
+        user_ids = list(self.__users.keys())
+        num_users = len(self.__users)
+        user_to_provider = self.__rng.randint(0, high=num_providers, size=num_users)
 
-        for idx in range(numUsers):
-            providerIdString = "p{:06d}".format(userIdxToProvider[idx])
+        for idx in range(num_users):
+            provider_id_string = f"p{user_to_provider[idx]:06d}"
 
-            self.__users[userIds[idx]] = providerIdString
+            self.__users[user_ids[idx]] = provider_id_string
 
-        if self.__bodySize < 65536:
-            addBody   = 63
-            addBuffer = 36
+        if self.__body_size < 65536:
+            add_body = 63
+            add_buffer = 36
         else:
-            addBody   = 65
-            addBuffer = 40
+            add_body = 65
+            add_buffer = 40
 
-        if 0 < layers and layers < 3:
-            addBuffer += 1
+        if 0 < layers < 3:
+            add_buffer += 1
         elif 2 < layers:
-            addBuffer += 3
+            add_buffer += 3
 
-        headerLen     = 71 * layers + 108
-        self.__params = SphinxParams(body_len=self.__bodySize + addBody, header_len=headerLen)
+        header_len = 71 * layers + 108
+        self.__params = SphinxParams(body_len=self.__body_size + add_body, header_len=header_len)
+        self.__pki = {}
+        self.__providers = []
 
-        self.__pki        = dict()
-        self.__nodes      = []
-        self.__cmdQueue   = Queue(maxsize=1)
-        self.__eventQueue = Queue()
+        for provider in range(num_providers):
+            node_id = f"p{provider:06d}"
+            new_node = Node(0, node_id, self.__params, add_buffer)
 
-        for provider in range(numProviders):
-            nodeId     = "p{:06d}".format(provider)
-            params     = self.__params
-            cmdQueue   = self.__cmdQueue
-            eventQueue = self.__eventQueue
-
-            newNode = Node(0, nodeId, params, cmdQueue, addBuffer, eventQueue)
-
-            self.__nodes       += [newNode]
-            self.__pki[nodeId]  = newNode.toPKIView()
+            self.__pki[node_id] = new_node
+            self.__providers += [node_id]
 
         for layer in range(1, layers + 1):
-            for node in range(nodesPerLayer):
-                nodeId     = "m{:06d}".format((layer - 1) * nodesPerLayer + node + numProviders)
-                params     = self.__params
-                cmdQueue   = self.__cmdQueue
-                eventQueue = self.__eventQueue
+            for node in range(nodes_per_layer):
+                node_id = f"m{((layer - 1) * nodes_per_layer + node + num_providers):06d}"
+                new_node = Node(layer, node_id, self.__params, add_buffer)
 
-                newNode = Node(layer, nodeId, params, cmdQueue, addBuffer, eventQueue)
+                self.__pki[node_id] = new_node
 
-                self.__nodes       += [newNode]
-                self.__pki[nodeId]  = newNode.toPKIView()
-            
-        self.__perLayerPKI = dict()
+        self.__per_layer_pki = {}
 
-        for nodeId, nodePKI in self.__pki.items():
-            if nodePKI['layer'] not in self.__perLayerPKI:
-                self.__perLayerPKI[nodePKI['layer']] = dict()
+        for node_id, node in self.__pki.items():
+            if node.layer not in self.__per_layer_pki:
+                self.__per_layer_pki[node.layer] = []
 
-            self.__perLayerPKI[nodePKI['layer']][nodeId] = nodePKI
+            self.__per_layer_pki[node.layer] += [node_id]
 
-        numSenders = len(self.__senders)
+        self.__legit_queues = {sender: Queue() for sender in self.__senders}
+        self.__latency_tracker = {}
 
-        keys  = [('DROP', numSenders), ('LOOP', numSenders), ('LEGIT', numSenders), ('DELAY', 1)]
-        keys += [('LOOP_MIX', len(self.__pki))]
+        self.__entropy = 0
+        self.__latency = 0
+        self.__entropy_sum = 0
+        self.__latency_sum = 0
+        self.__latency_num = 0
 
-        if 'RAW' not in self.__priorities:
-            self.__priorities['RAW'] = 1
+        if notebook:
+            from tqdm.notebook import tqdm
+        else:
+            from tqdm import tqdm
+
+        self.__env = Environment(initial_time=self.__start_time)
+        self.__pbar = tqdm(total=len(self.__traces))
+        self.__termination_event = self.__env.event()
+
+        self.__num_senders = len(self.__senders)
+
+        if 'num_senders' in config:
+            assert isinstance(config['num_senders'], int), 'num_senders must be int'
+            assert config['num_senders'] > 0, 'num_senders must be positive'
+
+            self.__num_senders = config['num_senders']
+
+        self.__actual_senders = self.__num_senders
+
+        if len(self.__senders) < self.__num_senders:
+            self.__fake_senders = [user for user in self.__users if user not in self.__senders]
+
+            difference = min(len(self.__fake_senders), self.__num_senders - len(self.__senders))
+
+            self.__rng.shuffle(self.__fake_senders)
+
+            self.__fake_senders = self.__fake_senders[:difference]
+        else:
+            self.__fake_senders = []
+
+        difference = self.__num_senders - len(self.__senders) - len(self.__fake_senders)
+
+        if difference > 0:
+            max_user_id = max([int(user[1:]) for user in self.__users.keys()])
+
+            assert 1e6 > difference + max_user_id, "num_senders is too large"
+
+            for user_idx in range(difference):
+                user_id = f'u{(1e6 - user_idx - 1):06d}'
+                self.__fake_senders += [user_id]
+                self.__users[user_id] = f"p{self.__rng.randint(0, high=num_providers):06d}"
+
+        self.__provider_dist = sorted(list(Counter(self.__users.values()).items()), key=lambda x: x[0])
+        self.__provider_dist = array(list(dict(self.__provider_dist).values())) / self.__num_senders
+
+        keys = [('DROP', self.__num_senders), ('LEGIT', self.__num_senders)]
+        keys += [('LOOP', self.__num_senders), ('DELAY', 1), ('LOOP_MIX', len(self.__pki))]
 
         for key, divisor in keys:
             if key not in self.__lambdas:
                 self.__lambdas[key] = 7.879036505057893
-            
+
             self.__lambdas[key] /= divisor
 
-            if key not in self.__priorities:
-                self.__priorities[key] = 1
+    def __random_plaintext(self, size: int) -> bytes:
+        return bytes(''.join(list(self.__rng.choice(ALL_CHARACTERS, size))), encoding='utf-8')
 
-        self.__entropyDict = dict()
+    def __gen_packet(self, split: str, sender: str, msg_id: str, of_type: str, receiver: str, size: int) -> tuple:
+        if of_type == 'LOOP_MIX':
+            path = []
+            layer = self.__pki[sender].layer
 
-        for nodeId in self.__pki:
-            self.__entropyDict[nodeId] = {'h': 0, 'k': 0, 'l': 0}
+            for next_layer in range(layer + 1, len(self.__per_layer_pki)):
+                path += rand_subset(self.__per_layer_pki[next_layer], 1)
 
-        self.__legitQueue     = Queue()
-        self.__messageQueue   = scheduler(time, sleep)
-        self.__latencyTracker = dict()
+            for next_layer in range(layer):
+                path += rand_subset(self.__per_layer_pki[next_layer], 1)
 
-    def __randomPlaintext(self, size : int) -> bytes:
-        return bytes(''.join(list(choice(ALL_CHARACTERS, size))), encoding='utf-8')
-
-    def __publicKeyFromPKI(self, publicKey : str) -> EcPt:
-        return EcPt(EcGroup()).from_binary(Bn.from_hex(publicKey).binary(), EcGroup())
-
-    def __genPckt(self, 
-                  split     : str,
-                  sender    : str, 
-                  ofType    : str,
-                  receiver  : str,
-                  messageId : str,
-                  size      : int) -> tuple :
-
-        if ofType == 'LOOP_MIX':
-            path  = []
-            layer = self.__pki[sender]['layer']
-
-            for nextLayer in range(layer + 1, len(self.__perLayerPKI)):
-                path += rand_subset(self.__perLayerPKI[nextLayer], 1)
-
-            for nextLayer in range(layer):
-                path += rand_subset(self.__perLayerPKI[nextLayer], 1)
-
-            path        += [sender]
-            destination  = bytes(sender, encoding='utf-8')
+            path += [sender]
+            destination = bytes(sender, encoding='utf-8')
         else:
-            path           = []
-            senderProvider = self.__users[sender]
+            path = []
+            sender_provider = self.__users[sender]
+            destination = bytes(sender, encoding='utf-8')
+            receiver_provider = sender_provider
 
-            for layer in range(1, len(self.__perLayerPKI)):
-                path += rand_subset(self.__perLayerPKI[layer], 1)
-            if ofType == 'LEGIT':
-                destination      = bytes(receiver, encoding='utf-8')
-                receiverProvider = self.__users[receiver]
-            elif ofType == 'DROP':
-                receiverProvider = rand_subset(self.__perLayerPKI[0], 1)[0]
-                destination      = bytes(receiverProvider, encoding='utf-8')
-            elif ofType == 'LOOP':
-                destination      = bytes(sender, encoding='utf-8')
-                receiverProvider = senderProvider
+            for layer in range(1, len(self.__per_layer_pki)):
+                path += rand_subset(self.__per_layer_pki[layer], 1)
 
-            path = [senderProvider] + path + [receiverProvider]
+            if of_type == 'LEGIT':
+                destination = bytes(receiver, encoding='utf-8')
+                receiver_provider = self.__users[receiver]
+            elif of_type == 'DROP':
+                receiver_provider = rand_subset(self.__per_layer_pki[0], 1)[0]
+                destination = bytes(receiver_provider, encoding='utf-8')
 
-        keys        = [self.__publicKeyFromPKI(self.__pki[nodeId]['publicKey']) for nodeId in path]
-        destination = (destination, messageId, split, TYPE_TO_ID[ofType])
-        nencWrapper = lambda dest, delay: Nenc((dest, delay, messageId, split, TYPE_TO_ID[ofType]))
+            path = [sender_provider] + path + [receiver_provider]
 
-        routing       = []
-        expectedDelay = 0
+        keys = [self.__pki[node_id].public_key for node_id in path]
+        destination = (destination, msg_id, split, TYPE_TO_ID[of_type])
+
+        def nenc_wrapper(target: str, delay_val: float) -> bytes:
+            return Nenc((target, delay_val, msg_id, split, TYPE_TO_ID[of_type]))
+
+        routing = []
+        expected_delay = 0
 
         for dest in path:
-            delay          = exponential(self.__lambdas['DELAY'])
-            routing       += [nencWrapper(dest, delay)]
-            expectedDelay += delay
+            delay = self.__rng.exponential(self.__lambdas['DELAY'])
+            routing += [nenc_wrapper(dest, delay)]
+            expected_delay += delay
 
-        message = self.__randomPlaintext(size) 
-        
+        message = self.__random_plaintext(size)
+
         header, delta = create_forward_message(self.__params, routing, keys, destination, message)
-        packed        = pack_message(self.__params, (header, delta))
+        packed = pack_message(self.__params, (header, delta))
 
-        return packed, path[0], messageId, split, ofType, expectedDelay
+        return packed, path[0], msg_id, split, of_type, expected_delay
 
-    def __generateMessage(self, sender : str, ofType : str, size : int, receiver : str = None) -> list:
-        assert  ofType in ['LEGIT', 'DROP', 'LOOP', 'LOOP_MIX']
-        assert (ofType != 'LEGIT'    and size      ==     self.__bodySize) or (ofType == 'LEGIT'                               )
-        assert (ofType == 'LEGIT'    and receiver  is not None           ) or (ofType != 'LEGIT'    and receiver  is None      )
-        assert (ofType != 'LOOP_MIX' and sender[0] ==     'u'            ) or (ofType == 'LOOP_MIX' and sender[0] in ['m', 'p'])
-        
-        msgId     = str(ObjectId())
-        splits    = []
-        wrapper   = lambda x, y : self.__genPckt(x, sender, ofType, receiver, msgId, y)
-        numSplits = int(ceil(size / self.__bodySize))
-        
-        for split in range(numSplits):
-            splitSize = self.__bodySize
-            
-            if split == numSplits-1:
-                splitSize = size - self.__bodySize * (numSplits-1)
+    def __generate_message(self, sender: str, of_type: str, size: int, receiver: str = None) -> list:
+        msg_id = str(ObjectId())
+        splits = []
 
-            splits += [wrapper("{:05d}".format(split), splitSize)]
-            
+        def wrapper(split_id: str, chunk_size: int) -> tuple:
+            return self.__gen_packet(split_id, sender, msg_id, of_type, receiver, chunk_size)
+
+        num_splits = int(ceil(size / self.__body_size))
+
+        for split in range(num_splits):
+            split_size = self.__body_size
+
+            if split == num_splits - 1:
+                split_size = size - self.__body_size * (num_splits - 1)
+
+            splits += [wrapper(f"{split:05d}", split_size)]
+
         return splits
 
-    def __sendPacket(self, packet : bytes, nextAddress : int):
-        try:
-            with socket(AF_INET, SOCK_STREAM) as client:
-                client.connect(('127.0.0.1', nextAddress))
-                client.sendall(packet)
-                client.close()
-        except:
-            print('ERROR')
+    def __put_on_legit_queue(self, mail: dict):
+        yield self.__env.timeout(mail['time'] + self.__lag)
 
-    def __putOnLegitQueue(self, sender : str, size : int, receiver : str):
-        splits = self.__generateMessage(sender, 'LEGIT', size, receiver)
+        size = mail['size']
+        sender = mail['sender']
+        receiver = mail['receiver']
+        splits = self.__generate_message(sender, 'LEGIT', size, receiver)
 
         for split in splits:
-            self.__legitQueue.put(split + (sender, len(splits)))
+            self.__legit_queues[sender].put(split + (sender, len(splits)))
 
-    def __worker(self, ofType : str, data : tuple = None):
-        assert  ofType in self.__lambdas.keys()
-        assert (ofType != 'DELAY' and data is None) or (ofType == 'DELAY' and data is not None)
+    def __simpy_worker(self, of_type: str):
+        while True:
+            delay = self.__rng.exponential(self.__lambdas[of_type])
 
-        if ofType == 'LEGIT':
-            if not self.__legitQueue.empty():
-                data = self.__legitQueue.get()
+            yield self.__env.timeout(delay)
+            self.__env.process(self.__worker(of_type))
+
+    def __sample_sender(self) -> str:
+        min_senders = [user for user, queue in self.__legit_queues.items() if not queue.empty()]
+        num_senders = max(len(min_senders), self.__num_senders)
+
+        if num_senders != self.__actual_senders:
+            for key in ['LEGIT', 'LOOP', 'DROP']:
+                self.__lambdas[key] = self.__lambdas[key] * self.__actual_senders / num_senders
+
+            self.__actual_senders = num_senders
+
+        non_min = [mail for mail in self.__traces if mail['sender'] not in min_senders]
+        all_times = [(mail['sender'], abs(mail['time'] - self.__env.now)) for mail in non_min]
+        sender_dist = {}
+
+        for sender, dist in all_times:
+            if sender not in sender_dist:
+                sender_dist[sender] = []
+
+            sender_dist[sender] += [dist]
+
+        sender_dist = [(sender, min(dists)) for sender, dists in sender_dist.items()]
+        sender_dist = sorted(sender_dist, key=lambda x: x[1])
+        min_senders += [sender for sender, dist in sender_dist] + self.__fake_senders
+        min_senders = min_senders[:num_senders]
+
+        return self.__rng.choice(min_senders)
+
+    def __worker(self, of_type: str, data: tuple = None):
+        start_time = time()
+
+        if of_type == 'DELAY':
+            sender = data[6]
+        elif of_type == 'LOOP_MIX':
+            sender = self.__rng.choice(list(self.__pki.keys()))
+        else:
+            sender = self.__sample_sender()
+
+        if of_type == 'LEGIT':
+            if not self.__legit_queues[sender].empty():
+                data = self.__legit_queues[sender].get()
 
         if data is None:
-            actualType = ofType
+            actual_type = of_type
 
-            if ofType == 'LEGIT':
-                actualType = 'DROP'
+            if of_type == 'LEGIT':
+                actual_type = 'DROP'
 
-            if ofType != 'LOOP_MIX':
-                sender = choice(self.__senders)
+            data = self.__generate_message(sender, actual_type, self.__body_size)[0] + (sender,)
+
+        packet = data[0]
+        next_node = data[1]
+        msg_id = data[2]
+        split = data[3]
+        actual_type = data[4]
+        next_address = self.__pki[next_node].port
+
+        send_packet(packet, next_address)
+        yield self.__env.timeout(max(0., time() - start_time))
+
+        time_str = f"{self.__env.now:.7f}"
+
+        info('%s %s %s %s %s %s', time_str, sender, next_node, msg_id, split, actual_type)
+
+        if of_type == 'LEGIT' and actual_type == 'LEGIT':
+            num_splits = data[7]
+
+            if msg_id not in self.__latency_tracker:
+                self.__latency_tracker[msg_id] = [num_splits, time_str]
+
+        #         if of_type == 'LOOP_MIX':
+        #             self.__latency_dict[sender][0] = float(time_str)
+
+        if of_type == 'DELAY' or (of_type == 'LOOP_MIX' and self.__loop_mix_entropy):
+            if of_type == 'LOOP_MIX' and self.__loop_mix_entropy:
+                self.__pki[sender].l_t += 1
+
+            self.__entropy_sum -= self.__pki[sender].h_t
+            self.__entropy_sum += self.__pki[sender].update_entropy()
+            self.__entropy = self.__entropy_sum / len(self.__pki)
+
+            self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
+
+        event = yield self.__env.process(self.__pki[next_node].process_packet(self.__env, packet))
+
+        if isinstance(event[0], float) and isinstance(event[1], tuple):
+            delay = event[0]
+            data = event[1]
+            sender = data[6]
+
+            self.__pki[sender].k_t += 1
+
+            yield self.__env.timeout(delay)
+            self.__env.process(self.__worker('DELAY', data))
+        elif isinstance(event[0], str) and isinstance(event[1], str):
+            msg_id = event[0]
+
+            if self.__latency_tracker[msg_id][0] == 1:
+                time_str = event[1]
+                latency = float(time_str) - float(self.__latency_tracker[msg_id][1])
+
+                self.__latency_sum += latency
+                self.__latency_num += 1
+                self.__latency = self.__latency_sum / self.__latency_num
+
+                self.__pbar.update(1)
+                self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
+
+                if self.__latency_num == len(self.__traces):
+                    self.__termination_event.succeed()
+                    self.__pbar.close()
             else:
-                sender = choice(list(self.__pki.keys()))
+                self.__latency_tracker[msg_id][0] -= 1
 
-            data = self.__generateMessage(sender, actualType, self.__bodySize)[0] + (sender, )
-
-        packet      = data[0]
-        nextNode    = data[1]
-        msgId       = data[2]
-        split       = data[3]
-        actualType  = data[4]
-        sender      = data[6]
-        nextAddress = self.__pki[nextNode]['port']
-
-        self.__sendPacket(packet, nextAddress)
-
-        timeStr = "{:.7f}".format(time())
-
-        info('%s %s %s %s %s %s', timeStr, sender, nextNode, msgId, split, actualType)
-
-        if ofType == 'LEGIT' and actualType == 'LEGIT':
-            numSplits = data[7]
-
-            if msgId not in self.__latencyTracker:
-                self.__latencyTracker[msgId] = [numSplits, timeStr, None]
-
-        if ofType != 'DELAY':
-            delay    = exponential(self.__lambdas[ofType])
-            worker   = Thread(target=self.__worker, args=(ofType, )).start
-            priority = self.__priorities[ofType]
-
-            self.__messageQueue.enter(delay, priority, worker)
-
-        if ofType == 'DELAY' or (ofType == 'LOOP_MIX' and self.__loopMixEntropy):
-            if ofType == 'LOOP_MIX' and self.__loopMixEntropy:
-                self.__entropyDict[sender]['l'] += 1
-
-            Thread(target=self.__updateEntropy, args=(sender,)).start()
-
-    def __updateEntropy(self, nodeId : str):
-        h = self.__entropyDict[nodeId]['h']
-        k = self.__entropyDict[nodeId]['k']
-        l = self.__entropyDict[nodeId]['l']
-
-        denominator = (k + l)
-        h_t         = l * h / denominator
-
-        if k != 0:
-            h_t += k * log2(k) / denominator
-            h_t -= k / denominator * log2(k / denominator)
-
-        if l != 0:
-            h_t -= l / denominator * log2(l / denominator)
-
-        self.__entropyDict[nodeId]['h'] = h_t
-        self.__entropyDict[nodeId]['l'] = l + k - 1
-        self.__entropyDict[nodeId]['k'] = 0
-
-        print('entropy:', mean(list([ent['h'] for ent in self.__entropyDict.values()])))
-
-    def runSimulation(self,):
-        threads  = [Thread(target=node.start) for node in self.__nodes]
-        threads += [Thread(target=self.__messageQueue.run)]
-
-        rawPriority = self.__priorities['RAW']
+    def run_simulation(self):
+        self.__pbar.reset(total=len(self.__traces))
 
         for mail in self.__traces:
-            worker      = Thread(target=self.__putOnLegitQueue, kwargs=mail).start
-            sendingTime = mail['time'] + self.__lag
+            self.__env.process(self.__put_on_legit_queue(mail))
 
-            del mail['time']
-            self.__messageQueue.enter(sendingTime, rawPriority, worker)
+        for of_type in ['LOOP', 'DROP', 'LEGIT', 'LOOP_MIX']:
+            self.__env.process(self.__simpy_worker(of_type))
 
-        for ofType in ['LOOP', 'DROP', 'LEGIT', 'LOOP_MIX']:
-            delay    = exponential(self.__lambdas[ofType])
-            worker   = Thread(target=self.__worker, args=(ofType, )).start
-            priority = self.__priorities[ofType]
-
-            self.__messageQueue.enter(delay, priority, worker)
-
-        startTime = time()
+        threads = [Thread(target=node.listener) for node in self.__pki.values()]
 
         for thread in threads:
             thread.start()
 
-        latencies = []
+        self.__env.run(self.__termination_event)
 
-        while time() < startTime + self.__maxSimTime and len(latencies) < len(self.__traces):
-            event = self.__eventQueue.get()
-
-            if type(event[0]) == float and type(event[1]) == tuple:
-                delay    = event[0]
-                data     = event[1]
-                sender   = data[6]
-                priority = self.__priorities['DELAY']
-
-                self.__entropyDict[sender]['k'] += 1
-
-                worker = Thread(target=self.__worker, args=('DELAY', data)).start
-
-                self.__messageQueue.enter(delay, priority, worker)
-            elif type(event[0]) == str and type(event[1]) == str:
-                msgId = event[0]
-
-                if self.__latencyTracker[msgId][0] == 1:
-                    timeStr = event[1]
-                    latency = float(timeStr) - float(self.__latencyTracker[msgId][1])
-
-                    self.__latencyTracker[msgId][2] = latency
-
-                    latencies = [t[2] for t in self.__latencyTracker.values() if t[2] is not None]
-
-                    print('latency:', mean(latencies), len(latencies))
-                else:
-                    self.__latencyTracker[msgId][0] -= 1
-
-        for event in self.__messageQueue.queue:
-            self.__messageQueue.cancel(event)
-
-        self.__cmdQueue.put(None)
+        for node in self.__pki.values():
+            send_packet(b'TERMINATE_SIMULATION', node.port)
 
         for thread in threads:
             thread.join()
-
-        
-
