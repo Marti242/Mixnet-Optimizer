@@ -7,6 +7,7 @@ from logging import info
 
 from numpy import log2
 from simpy import Environment
+from packet import Packet
 from sphinxmix.SphinxNode import sphinx_process
 from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import PFdecode
@@ -66,7 +67,8 @@ class Node:
             of_type = ID_TO_TYPE[routing[1][4]]
 
             packed = pack_message(self.__params, processed[2])
-            queue_tuple = (packed, next_node, message_id, split, of_type, -1, self.__node_id)
+            queue_tuple = Packet(packed, next_node, message_id, split, of_type, -1)
+            queue_tuple.sender = self.__node_id
 
             yield env.timeout(time() - start_time)
             return delay, queue_tuple

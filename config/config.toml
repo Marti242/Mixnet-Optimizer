@@ -5,10 +5,11 @@ log_file         = "../../logs/logs.log"
 body_size        = 5436
 start_time       = 1575154800.901652
 traces_file      = "../../data/sample.json"
+num_senders      = 2
+client_model     = "UNIFORM_PROVIDER"
 num_providers    = 2
 nodes_per_layer  = 2
 loop_mix_entropy = true
-num_senders      = 1
 
 [lambdas]
 LOOP     = 7.879036505057893
