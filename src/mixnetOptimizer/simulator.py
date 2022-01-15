@@ -5,7 +5,6 @@ from queue import Queue
 from string import digits
 from string import punctuation
 from string import ascii_letters
-from typing import List
 from typing import Optional
 from typing import Generator
 from logging import info
@@ -269,12 +268,13 @@ class Simulator:
         return bytes(''.join(list(self.__rng.choice(ALL_CHARACTERS, size))), encoding='utf-8')
 
     def __gen_packet(self,
-                     split: str,
                      sender: str,
                      msg_id: str,
                      of_type: str,
-                     receiver: str,
-                     size: int) -> Packet:
+                     size: int,
+                     split: str = f'{0:05d}',
+                     num_splits: int = 1,
+                     receiver: Optional[str] = None) -> Packet:
         if of_type == 'LOOP_MIX':
             path = []
             layer = self.__pki[sender].layer
@@ -314,10 +314,10 @@ class Simulator:
         def nenc_wrapper(target: str, delay_val: float) -> bytes:
             return Nenc((target, delay_val, msg_id, split, TYPE_TO_ID[of_type]))
 
-        routing = []
-        expected_delay = 0
+        routing = [nenc_wrapper(path[0], 0.0)]
+        expected_delay = 0.0
 
-        for dest in path:
+        for dest in path[1:]:
             delay = self.__rng.exponential(self.__lambdas['DELAY'])
             routing += [nenc_wrapper(dest, delay)]
             expected_delay += delay
@@ -327,43 +327,33 @@ class Simulator:
         header, delta = create_forward_message(self.__params, routing, keys, destination, message)
         packed = pack_message(self.__params, (header, delta))
 
-        return Packet(packed, path[0], msg_id, split, of_type, expected_delay)
+        return Packet(packed, path[0], msg_id, split, of_type, sender, expected_delay, num_splits)
 
-    def __generate_message(self,
-                           sender: str,
-                           of_type: str,
-                           size: int,
-                           receiver: Optional[str] = None) -> List[Packet]:
+    def __put_on_legit_queue(self, mail: Mail) -> Generator:
+        yield self.__env.timeout(mail.time + self.__lag)
+
+        start_time = time()
+        sender = mail.sender
+        receiver = mail.receiver
         msg_id = str(ObjectId())
-        splits = []
+        num_splits = int(ceil(mail.size / self.__body_size))
 
-        def wrapper(split_id: str, chunk_size: int) -> Packet:
-            return self.__gen_packet(split_id, sender, msg_id, of_type, receiver, chunk_size)
-
-        num_splits = int(ceil(size / self.__body_size))
+        def wrapper(split_id: str, size: int) -> Packet:
+            return self.__gen_packet(sender, msg_id, 'LEGIT', size, split_id, num_splits, receiver)
 
         for split in range(num_splits):
             split_size = self.__body_size
 
             if split == num_splits - 1:
-                split_size = size - self.__body_size * (num_splits - 1)
+                split_size = mail.size - self.__body_size * (num_splits - 1)
 
-            splits += [wrapper(f"{split:05d}", split_size)]
+            packet = wrapper(f"{split:05d}", split_size)
 
-        return splits
+            yield self.__env.timeout(max(0.0, time() - start_time))
 
-    def __put_on_legit_queue(self, mail: Mail) -> Generator:
-        yield self.__env.timeout(mail.time + self.__lag)
+            start_time = time()
 
-        size = mail.size
-        sender = mail.sender
-        receiver = mail.receiver
-        splits = self.__generate_message(sender, 'LEGIT', size, receiver)
-
-        for split in splits:
-            split.sender = sender
-            split.num_splits = len(splits)
-            self.__legit_queues[sender].put(split)
+            self.__legit_queues[sender].put(packet)
 
     def __simpy_worker(self, of_type: str) -> Generator:
         while True:
@@ -412,9 +402,7 @@ class Simulator:
 
         return self.__rng.choice(min_senders)
 
-    def __worker(self,
-                 of_type: str,
-                 data: Optional[Packet] = None) -> Generator:
+    def __worker(self, of_type: str, data: Optional[Packet] = None) -> Generator:
         start_time = time()
 
         if of_type == 'DELAY':
@@ -434,8 +422,8 @@ class Simulator:
             if of_type == 'LEGIT':
                 actual_type = 'DROP'
 
-            data = self.__generate_message(sender, actual_type, self.__body_size)[0]
-            data.sender = sender
+            msg_id = str(ObjectId())
+            data = self.__gen_packet(sender, msg_id, actual_type, self.__body_size)
 
         packet = data.packet
         next_node = data.next_node
@@ -443,6 +431,10 @@ class Simulator:
         split = data.split
         actual_type = data.of_type
         next_address = self.__pki[next_node].port
+
+        if of_type == 'LOOP_MIX':
+            expected_delay = data.expected_delay
+            self.__pki[sender].sending_time[msg_id] = (self.__env.now, expected_delay)
 
         send_packet(packet, next_address)
         yield self.__env.timeout(max(0., time() - start_time))
@@ -456,9 +448,6 @@ class Simulator:
 
             if msg_id not in self.__latency_tracker:
                 self.__latency_tracker[msg_id] = [num_splits, time_str]
-
-        #         if of_type == 'LOOP_MIX':
-        #             self.__latency_dict[sender][0] = float(time_str)
 
         if of_type == 'DELAY' or (of_type == 'LOOP_MIX' and self.__loop_mix_entropy):
             if of_type == 'LOOP_MIX' and self.__loop_mix_entropy:
@@ -480,7 +469,7 @@ class Simulator:
             self.__pki[sender].k_t += 1
 
             yield self.__env.timeout(delay)
-            self.__env.process(self.__worker('DELAY', data))
+            yield self.__env.process(self.__worker('DELAY', data))
         elif isinstance(event[0], str) and isinstance(event[1], str):
             msg_id = event[0]
 

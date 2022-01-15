@@ -35,9 +35,13 @@ class Node:
         self.layer = layer
         self.public_key = params.group.expon(params.group.g, [self.__secret_key])
 
-        self.h_t = 0
-        self.k_t = 0
-        self.l_t = 0
+        self.h_t = 0.0
+        self.k_t = 0.0
+        self.l_t = 0.0
+
+        self.sending_time = dict()
+        self.last_latency = 0.0
+        self.running_latency = 0.0
 
     def process_packet(self, env: Environment, data: bytes) -> Generator:
         start_time = time()
@@ -62,13 +66,12 @@ class Node:
         if flag == Relay_flag:
             next_node = routing[1][0]
             delay = routing[1][1]
-            message_id = routing[1][2]
+            msg_id = routing[1][2]
             split = routing[1][3]
             of_type = ID_TO_TYPE[routing[1][4]]
 
             packed = pack_message(self.__params, processed[2])
-            queue_tuple = Packet(packed, next_node, message_id, split, of_type, -1)
-            queue_tuple.sender = self.__node_id
+            queue_tuple = Packet(packed, next_node, msg_id, split, of_type, self.__node_id)
 
             yield env.timeout(time() - start_time)
             return delay, queue_tuple
@@ -92,6 +95,16 @@ class Node:
 
             if of_type == 'LEGIT':
                 return msg_id, time_str
+
+            if of_type == 'LOOP_MIX':
+                latency = max([env.now - send_time for send_time, _ in self.sending_time.values()])
+                expected_delay = self.sending_time[msg_id][1]
+                self.last_latency = env.now - self.sending_time[msg_id][0]
+                self.running_latency = 0.1 * latency + 0.9 * self.running_latency
+
+                assert self.last_latency >= expected_delay, 'MESSAGE RECEIVED TOO EARLY'
+
+                del self.sending_time[msg_id]
 
         return None, None
 

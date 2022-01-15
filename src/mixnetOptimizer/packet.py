@@ -1,3 +1,6 @@
+from typing import Optional
+
+
 class Packet:
     """PACKET"""
 
@@ -7,12 +10,14 @@ class Packet:
                  msg_id: str,
                  split: str,
                  of_type: str,
-                 expected_delay: float):
+                 sender: str,
+                 expected_delay: Optional[float] = None,
+                 num_splits: Optional[int] = None):
         self.packet = packet
         self.msg_id = msg_id
         self.next_node = next_node
         self.split = split
         self.of_type = of_type
+        self.sender = sender
         self.expected_delay = expected_delay
-        self.sender = None
-        self.num_splits = None
+        self.num_splits = num_splits
