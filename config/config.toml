@@ -7,7 +7,7 @@ start_time       = 1575154800.901652
 traces_file      = "../../data/sample.json"
 num_senders      = 2
 client_model     = "ALL_SIMULATION"
-num_providers    = 14
+num_providers    = 2
 nodes_per_layer  = 2
 loop_mix_entropy = true
 

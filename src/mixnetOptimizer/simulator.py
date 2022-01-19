@@ -51,9 +51,9 @@ class Simulator:
         assert isinstance(config['traces_file'], str), 'Path to traces file must be string'
         assert config['traces_file'][-5:] == '.json', 'Traces file must be in JSON format'
 
-        layers = 2
         self.__rng = RandomState()
         self.__lag = 10
+        self.__layers = 2
         num_providers = 2
         self.__lambdas = {}
         nodes_per_layer = 2
@@ -69,7 +69,7 @@ class Simulator:
         if 'layers' in config:
             assert isinstance(config['layers'], int), 'layers must be int'
 
-            layers = config['layers']
+            self.__layers = config['layers']
 
         if 'lambdas' in config:
             assert isinstance(config['lambdas'], dict), 'lambdas must be dict'
@@ -113,19 +113,20 @@ class Simulator:
         basicConfig(filename=config['log_file'], level=INFO, encoding='utf-8')
 
         if self.__body_size < 65536:
-            add_body = 63
+            self.__add_body = 63
             add_buffer = 36
         else:
-            add_body = 65
+            self.__add_body = 65
             add_buffer = 40
 
-        if 0 < layers < 3:
+        if 0 < self.__layers < 3:
             add_buffer += 1
-        elif 2 < layers:
+        elif 2 < self.__layers:
             add_buffer += 3
 
-        header_len = 71 * layers + 108
-        self.__params = SphinxParams(body_len=self.__body_size + add_body, header_len=header_len)
+        body_len = self.__body_size + self.__add_body
+        header_len = 71 * self.__layers + 108
+        self.__params = SphinxParams(body_len=body_len, header_len=header_len)
         self.__pki = {}
         self.__providers = []
 
@@ -136,7 +137,7 @@ class Simulator:
             self.__pki[node_id] = new_node
             self.__providers += [node_id]
 
-        for layer in range(1, layers + 1):
+        for layer in range(1, self.__layers + 1):
             for node in range(nodes_per_layer):
                 node_id = f'm{((layer - 1) * nodes_per_layer + node + num_providers):06d}'
                 new_node = Node(layer, node_id, self.__params, add_buffer)
@@ -154,8 +155,7 @@ class Simulator:
         with open(config['traces_file'], 'r', encoding='utf-8') as file:
             traces = json.load(file)
 
-        traces = [Mail(x['time'], x['size'], x['sender'], x['receiver']) for x in traces]
-        self.__traces = traces
+        self.__traces = [Mail(x['time'], x['size'], x['sender'], x['receiver']) for x in traces]
 
         self.__users = []
         self.__senders = []
