@@ -264,6 +264,13 @@ class Simulator:
 
             self.__lambdas[key] /= divisor
 
+        self.__event_log = {'postprocess': {},
+                            'send_packet': {},
+                            'decoy_wrapper': {},
+                            'process_packet': {},
+                            'legit_to_sphinx': {},
+                            'put_on_legit_queue': {}}
+
     def __random_plaintext(self, size: int) -> bytes:
         return bytes(''.join(list(self.__rng.choice(ALL_CHARACTERS, size))), encoding='utf-8')
 
@@ -329,38 +336,58 @@ class Simulator:
 
         return Packet(packed, path[0], msg_id, split, of_type, sender, expected_delay, num_splits)
 
-    def __put_on_legit_queue(self, mail: Mail) -> Generator:
+    def __legit_wrapper(self, mail: Mail) -> Generator:
         yield self.__env.timeout(mail.time + self.__lag)
+        yield self.__env.process(self.__legit_to_sphinx(mail))
 
+    def __legit_to_sphinx(self,
+                          mail: Mail,
+                          msg_id: Optional[str] = None,
+                          start_split: Optional[int] = 0) -> Generator:
         start_time = time()
+
         sender = mail.sender
         receiver = mail.receiver
-        msg_id = str(ObjectId())
         num_splits = int(ceil(mail.size / self.__body_size))
+
+        if msg_id is None:
+            msg_id = str(ObjectId())
 
         def wrapper(split_id: str, size: int) -> Packet:
             return self.__gen_packet(sender, msg_id, 'LEGIT', size, split_id, num_splits, receiver)
 
-        for split in range(num_splits):
+        for split_idx in range(start_split, num_splits):
             split_size = self.__body_size
 
-            if split == num_splits - 1:
+            if split_idx == num_splits - 1:
                 split_size = mail.size - self.__body_size * (num_splits - 1)
 
-            packet = wrapper(f"{split:05d}", split_size)
+            packet = wrapper(f"{split_idx:05d}", split_size)
+            event_id = str(ObjectId())
 
-            yield self.__env.timeout(max(0.0, time() - start_time))
+            runtime = time() - start_time
+            next_time = runtime + self.__env.now
+            self.__event_log['legit_to_sphinx'][event_id] = (next_time, mail, msg_id, split_idx)
+            self.__event_log['put_on_legit_queue'][event_id] = (next_time, sender, packet)
+
+            yield self.__env.timeout(runtime)
 
             start_time = time()
 
-            self.__legit_queues[sender].put(packet)
+            self.__put_on_legit_queue(sender, packet, event_id)
 
-    def __simpy_worker(self, of_type: str) -> Generator:
+    def __put_on_legit_queue(self, sender: str, packet: Packet, event_id: str):
+        del self.__event_log['legit_to_sphinx'][event_id]
+        del self.__event_log['put_on_legit_queue'][event_id]
+        self.__legit_queues[sender].put(packet)
+
+    def __decoy_worker(self, of_type: str) -> Generator:
         while True:
             delay = self.__rng.exponential(self.__lambdas[of_type])
+            self.__event_log['decoy_wrapper'][of_type] = self.__env.now + delay
 
             yield self.__env.timeout(delay)
-            self.__env.process(self.__worker(of_type))
+            self.__env.process(self.__send_packet(of_type))
 
     def __sample_sender(self) -> str:
         if self.__client_model == 'ALL_SIMULATION':
@@ -402,8 +429,14 @@ class Simulator:
 
         return self.__rng.choice(min_senders)
 
-    def __worker(self, of_type: str, data: Optional[Packet] = None) -> Generator:
+    def __send_packet(self,
+                      of_type: str,
+                      data: Optional[Packet] = None,
+                      event_id: Optional[str] = None) -> Generator:
         start_time = time()
+
+        if event_id is not None:
+            del self.__event_log['send_packet'][event_id]
 
         if of_type == 'DELAY':
             sender = data.sender
@@ -426,10 +459,8 @@ class Simulator:
             data = self.__gen_packet(sender, msg_id, actual_type, self.__body_size)
 
         packet = data.packet
-        next_node = data.next_node
         msg_id = data.msg_id
-        split = data.split
-        actual_type = data.of_type
+        next_node = data.next_node
         next_address = self.__pki[next_node].port
 
         if of_type == 'LOOP_MIX':
@@ -437,7 +468,27 @@ class Simulator:
             self.__pki[sender].sending_time[msg_id] = (self.__env.now, expected_delay)
 
         send_packet(packet, next_address)
-        yield self.__env.timeout(max(0., time() - start_time))
+
+        event_id = str(ObjectId())
+
+        runtime = time() - start_time
+        next_time = self.__env.now + runtime
+        self.__event_log['process_packet'][event_id] = (next_time, of_type, data)
+
+        yield self.__env.timeout(runtime)
+        yield self.__env.process(self.__process_packet(of_type, data, event_id))
+
+    def __process_packet(self, of_type: str, data: Packet, event_id: str) -> Generator:
+        start_time = time()
+
+        del self.__event_log['process_packet'][event_id]
+
+        split = data.split
+        packet = data.packet
+        sender = data.sender
+        msg_id = data.msg_id
+        next_node = data.next_node
+        actual_type = data.of_type
 
         time_str = f"{self.__env.now:.7f}"
 
@@ -459,45 +510,68 @@ class Simulator:
 
             self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
 
-        event = yield self.__env.process(self.__pki[next_node].process_packet(self.__env, packet))
+        outcome = self.__pki[next_node].process_packet(packet)
+        event_id = str(ObjectId())
 
-        if isinstance(event[0], float) and isinstance(event[1], Packet):
-            delay = event[0]
-            data = event[1]
-            sender = data.sender
+        self.__pki[next_node].k_t += 1
 
-            self.__pki[sender].k_t += 1
+        if isinstance(outcome[0], float) and isinstance(outcome[1], Packet):
+            delay = outcome[0]
+            data = outcome[1]
 
-            yield self.__env.timeout(delay)
-            yield self.__env.process(self.__worker('DELAY', data))
-        elif isinstance(event[0], str) and isinstance(event[1], str):
-            msg_id = event[0]
+            runtime = time() - start_time + delay
+            next_time = self.__env.now + runtime
+            self.__event_log['send_packet'][event_id] = (next_time, data)
 
-            if self.__latency_tracker[msg_id][0] == 1:
-                time_str = event[1]
-                latency = float(time_str) - float(self.__latency_tracker[msg_id][1])
+            yield self.__env.timeout(runtime)
+            yield self.__env.process(self.__send_packet('DELAY', data, event_id))
+        else:
+            runtime = time() - start_time
+            next_time = self.__env.now + runtime
+            self.__event_log['postprocess'][event_id] = (next_time,) + outcome + (next_node,)
 
-                self.__latency_sum += latency
-                self.__latency_num += 1
-                self.__latency = self.__latency_sum / self.__latency_num
+            yield self.__env.timeout(runtime)
+            self.__postprocess(outcome[0], outcome[1], outcome[2], outcome[3], next_node, event_id)
 
-                self.__pbar.update(1)
-                self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
+    def __postprocess(self,
+                      destination: str,
+                      msg_id: str,
+                      split: str,
+                      of_type: str,
+                      node_id: str,
+                      event_id: str):
+        del self.__event_log['postprocess'][event_id]
 
-                if self.__latency_num == len(self.__traces):
-                    self.__termination_event.succeed()
-                    self.__pbar.close()
-            else:
-                self.__latency_tracker[msg_id][0] -= 1
+        time_str = f"{self.__env.now:.7f}"
+
+        info('%s %s %s %s %s %s', time_str, node_id, destination, msg_id, split, of_type)
+
+        if of_type == 'LEGIT' and self.__latency_tracker[msg_id][0] == 1:
+            latency = self.__env.now - float(self.__latency_tracker[msg_id][1])
+
+            self.__latency_sum += latency
+            self.__latency_num += 1
+            self.__latency = self.__latency_sum / self.__latency_num
+
+            self.__pbar.update(1)
+            self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
+
+            if self.__latency_num == len(self.__traces):
+                self.__termination_event.succeed()
+                self.__pbar.close()
+        elif of_type == 'LEGIT':
+            self.__latency_tracker[msg_id][0] -= 1
+        elif of_type == 'LOOP_MIX':
+            self.__pki[node_id].postprocess(self.__env.now, msg_id)
 
     def run_simulation(self):
         self.__pbar.reset(total=len(self.__traces))
 
         for mail in self.__traces:
-            self.__env.process(self.__put_on_legit_queue(mail))
+            self.__env.process(self.__legit_wrapper(mail))
 
         for of_type in ['LOOP', 'DROP', 'LEGIT', 'LOOP_MIX']:
-            self.__env.process(self.__simpy_worker(of_type))
+            self.__env.process(self.__decoy_worker(of_type))
 
         threads = [Thread(target=node.listener) for node in self.__pki.values()]
 
@@ -511,3 +585,5 @@ class Simulator:
 
         for thread in threads:
             thread.join()
+
+        return self.__event_log

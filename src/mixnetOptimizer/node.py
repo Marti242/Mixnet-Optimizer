@@ -1,12 +1,9 @@
-from time import time
 from socket import socket
 from socket import AF_INET
 from socket import SOCK_DGRAM
-from typing import Generator
-from logging import info
+from typing import Tuple
 
 from numpy import log2
-from simpy import Environment
 from packet import Packet
 from sphinxmix.SphinxNode import sphinx_process
 from sphinxmix.SphinxParams import SphinxParams
@@ -43,8 +40,7 @@ class Node:
         self.last_latency = 0.0
         self.running_latency = 0.0
 
-    def process_packet(self, env: Environment, data: bytes) -> Generator:
-        start_time = time()
+    def process_packet(self, data: bytes) -> Tuple:
         unpacked = unpack_message(self.__params_dict, data)
         header = unpacked[1][0]
         delta = unpacked[1][1]
@@ -58,14 +54,13 @@ class Node:
 
         if tag in self.__tag_cache:
             print('REPLAY ATTACK')
-            yield env.timeout(time() - start_time)
             raise Exception()
 
         self.__tag_cache.add(tag)
 
         if flag == Relay_flag:
             next_node = routing[1][0]
-            delay = routing[1][1]
+            delay = float(routing[1][1])
             msg_id = routing[1][2]
             split = routing[1][3]
             of_type = ID_TO_TYPE[routing[1][4]]
@@ -73,7 +68,6 @@ class Node:
             packed = pack_message(self.__params, processed[2])
             queue_tuple = Packet(packed, next_node, msg_id, split, of_type, self.__node_id)
 
-            yield env.timeout(time() - start_time)
             return delay, queue_tuple
 
         if flag == Dest_flag:
@@ -81,32 +75,22 @@ class Node:
             mac_key = processed[3]
 
             dest, _ = receive_forward(self.__params, mac_key, delta)
-
             destination = dest[0].decode('utf-8')
             msg_id = dest[1]
             split = dest[2]
             of_type = ID_TO_TYPE[dest[3]]
 
-            yield env.timeout(time() - start_time)
+            return destination, msg_id, split, of_type
 
-            time_str = f"{env.now:.7f}"
+    def postprocess(self, timestamp: float, msg_id: str):
+        latency = max([timestamp - send_time for send_time, _ in self.sending_time.values()])
+        expected_delay = self.sending_time[msg_id][1]
+        self.last_latency = timestamp - self.sending_time[msg_id][0]
+        self.running_latency = 0.1 * latency + 0.9 * self.running_latency
 
-            info('%s %s %s %s %s %s', time_str, self.__node_id, destination, msg_id, split, of_type)
+        assert self.last_latency >= expected_delay, 'MESSAGE RECEIVED TOO EARLY'
 
-            if of_type == 'LEGIT':
-                return msg_id, time_str
-
-            if of_type == 'LOOP_MIX':
-                latency = max([env.now - send_time for send_time, _ in self.sending_time.values()])
-                expected_delay = self.sending_time[msg_id][1]
-                self.last_latency = env.now - self.sending_time[msg_id][0]
-                self.running_latency = 0.1 * latency + 0.9 * self.running_latency
-
-                assert self.last_latency >= expected_delay, 'MESSAGE RECEIVED TOO EARLY'
-
-                del self.sending_time[msg_id]
-
-        return None, None
+        del self.sending_time[msg_id]
 
     def update_entropy(self,) -> float:
         denominator = (self.k_t + self.l_t)
