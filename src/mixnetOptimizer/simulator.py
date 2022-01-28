@@ -1,4 +1,5 @@
 import json
+import pickle
 
 from time import time
 from queue import Queue
@@ -15,16 +16,20 @@ from collections import Counter
 
 import toml
 
-from mail import Mail
 from node import Node
 from util import send_packet
-from packet import Packet
+from model.mail import Mail
+from model.packet import Packet
 
-from bson import ObjectId
 from simpy import Environment
+from simpy.util import start_delayed
+
 from numpy import ceil
 from numpy import array
 from numpy.random import RandomState
+
+from bson import ObjectId
+from petlib.bn import Bn
 from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import Nenc
 from sphinxmix.SphinxClient import rand_subset
@@ -52,13 +57,14 @@ class Simulator:
         assert config['traces_file'][-5:] == '.json', 'Traces file must be in JSON format'
 
         self.__rng = RandomState()
-        self.__lag = 10
+        self.__lag = 10.0
         self.__layers = 2
         num_providers = 2
         self.__lambdas = {}
         nodes_per_layer = 2
+        self.__end_time = 0.0
         self.__body_size = 5436
-        self.__start_time = 0
+        self.__start_time = 0.0
         self.__loop_mix_entropy = False
 
         if 'lag' in config:
@@ -170,16 +176,18 @@ class Simulator:
         self.__legit_queues = {sender: Queue() for sender in self.__senders}
         self.__latency_tracker = {}
 
-        self.__entropy = 0
-        self.__latency = 0
-        self.__entropy_sum = 0
-        self.__latency_sum = 0
+        self.__entropy = 0.0
+        self.__latency = 0.0
+        self.__entropy_sum = 0.0
+        self.__latency_sum = 0.0
         self.__latency_num = 0
 
         if notebook:
             from tqdm.notebook import tqdm
         else:
             from tqdm import tqdm
+
+        self.__tqdm = tqdm
 
         self.__env = Environment(initial_time=self.__start_time)
         self.__pbar = tqdm(total=len(self.__traces))
@@ -343,8 +351,12 @@ class Simulator:
     def __legit_to_sphinx(self,
                           mail: Mail,
                           msg_id: Optional[str] = None,
-                          start_split: Optional[int] = 0) -> Generator:
+                          start_split: int = 0,
+                          event_id: Optional[str] = None) -> Generator:
         start_time = time()
+
+        if event_id is not None and event_id in self.__event_log['legit_to_spinx']:
+            del self.__event_log['legit_to_spinx'][event_id]
 
         sender = mail.sender
         receiver = mail.receiver
@@ -370,15 +382,21 @@ class Simulator:
             self.__event_log['legit_to_sphinx'][event_id] = (next_time, mail, msg_id, split_idx)
             self.__event_log['put_on_legit_queue'][event_id] = (next_time, sender, packet)
 
-            yield self.__env.timeout(runtime)
+            yield self.__env.process(self.__put_on_legit_queue(sender, packet, runtime, event_id))
 
             start_time = time()
 
-            self.__put_on_legit_queue(sender, packet, event_id)
-
-    def __put_on_legit_queue(self, sender: str, packet: Packet, event_id: str):
-        del self.__event_log['legit_to_sphinx'][event_id]
+    def __put_on_legit_queue(self,
+                             sender: str,
+                             packet: Packet,
+                             runtime: float,
+                             event_id: str) -> Generator:
+        yield self.__env.timeout(runtime)
         del self.__event_log['put_on_legit_queue'][event_id]
+
+        if event_id in self.__event_log['legit_to_sphinx']:
+            del self.__event_log['legit_to_sphinx'][event_id]
+
         self.__legit_queues[sender].put(packet)
 
     def __decoy_worker(self, of_type: str) -> Generator:
@@ -498,7 +516,7 @@ class Simulator:
             num_splits = data.num_splits
 
             if msg_id not in self.__latency_tracker:
-                self.__latency_tracker[msg_id] = [num_splits, time_str]
+                self.__latency_tracker[msg_id] = [num_splits, self.__env.now]
 
         if of_type == 'DELAY' or (of_type == 'LOOP_MIX' and self.__loop_mix_entropy):
             if of_type == 'LOOP_MIX' and self.__loop_mix_entropy:
@@ -529,9 +547,10 @@ class Simulator:
             runtime = time() - start_time
             next_time = self.__env.now + runtime
             self.__event_log['postprocess'][event_id] = (next_time,) + outcome + (next_node,)
+            args = outcome
+            args += (next_node, runtime, event_id)
 
-            yield self.__env.timeout(runtime)
-            self.__postprocess(outcome[0], outcome[1], outcome[2], outcome[3], next_node, event_id)
+            yield self.__env.process(self.__postprocess(*args))
 
     def __postprocess(self,
                       destination: str,
@@ -539,15 +558,20 @@ class Simulator:
                       split: str,
                       of_type: str,
                       node_id: str,
-                      event_id: str):
+                      runtime: float,
+                      event_id: str) -> Generator:
+        yield self.__env.timeout(runtime)
         del self.__event_log['postprocess'][event_id]
 
         time_str = f"{self.__env.now:.7f}"
 
         info('%s %s %s %s %s %s', time_str, node_id, destination, msg_id, split, of_type)
 
-        if of_type == 'LEGIT' and self.__latency_tracker[msg_id][0] == 1:
-            latency = self.__env.now - float(self.__latency_tracker[msg_id][1])
+        if of_type == 'LEGIT':
+            self.__latency_tracker[msg_id][0] -= 1
+
+        if of_type == 'LEGIT' and self.__latency_tracker[msg_id][0] == 0:
+            latency = self.__env.now - self.__latency_tracker[msg_id][1]
 
             self.__latency_sum += latency
             self.__latency_num += 1
@@ -559,13 +583,110 @@ class Simulator:
             if self.__latency_num == len(self.__traces):
                 self.__termination_event.succeed()
                 self.__pbar.close()
-        elif of_type == 'LEGIT':
-            self.__latency_tracker[msg_id][0] -= 1
         elif of_type == 'LOOP_MIX':
             self.__pki[node_id].postprocess(self.__env.now, msg_id)
 
-    def run_simulation(self):
-        self.__pbar.reset(total=len(self.__traces))
+    def save(self, save_file: str):
+        assert save_file[-4:] == '.pkl', 'Save file must be in pickle format'
+
+        self.__end_time = self.__env.now
+        self.__legit_queues = {user: queue.queue for user, queue in self.__legit_queues.items()}
+
+        del self.__env
+        del self.__pbar
+        del self.__params
+        del self.__termination_event
+
+        for node in self.__pki.values():
+            node.secret_key = node.secret_key.hex()
+
+            del node.params
+            del node.params_dict
+            del node.public_key
+
+        with open(save_file, 'wb') as file:
+            pickle.dump(self, file)
+
+    def fix_loaded(self):
+        body_len = self.__body_size + self.__add_body
+        header_len = 71 * self.__layers + 108
+        sending_time = self.__end_time - self.__start_time - self.__lag
+        legit_queues = {user: (queue, Queue()) for user, queue in self.__legit_queues.items()}
+        num_delivered = len([1 for remain, _ in self.__latency_tracker.values() if remain == 0])
+
+        for old_queue, queue in legit_queues.values():
+
+            for item in old_queue:
+                queue.put(item)
+
+        self.__env = Environment(initial_time=self.__end_time)
+        self.__pbar = self.__tqdm(total=len(self.__traces) - num_delivered)
+        self.__params = SphinxParams(body_len=body_len, header_len=header_len)
+        self.__legit_queues = {user: queue[1] for user, queue in legit_queues.items()}
+        self.__termination_event = self.__env.event()
+
+        params_dict = {(self.__params.max_len, self.__params.m): self.__params}
+
+        for node in self.__pki.values():
+            node.params = self.__params
+            node.secret_key = Bn().from_hex(node.secret_key)
+            node.public_key = self.__params.group.expon(self.__params.group.g, [node.secret_key])
+            node.params_dict = params_dict
+
+        for mail in self.__traces:
+            if mail.time > sending_time:
+                self.__env.process(self.__legit_wrapper(mail))
+
+        for event_id, args in self.__event_log['postprocess'].items():
+            delay = args[0] - self.__end_time
+            dest = args[1]
+            msg = args[2]
+            split = args[3]
+            of_type = args[4]
+            node = args[5]
+
+            self.__env.process(self.__postprocess(dest, msg, split, of_type, node, delay, event_id))
+
+        for event_id, args in self.__event_log['send_packet'].items():
+            delay = args[0] - self.__end_time
+            packet = args[1]
+
+            start_delayed(self.__env, self.__send_packet('DELAY', packet, event_id), delay)
+
+        for of_type, next_time in self.__event_log['decoy_wrapper'].items():
+            delay = next_time - self.__end_time
+
+            start_delayed(self.__env, self.__send_packet(of_type), delay)
+            start_delayed(self.__env, self.__decoy_worker(of_type), delay)
+
+        for event_id, args in self.__event_log['process_packet'].items():
+            delay = args[0] - self.__end_time
+            of_type = args[1]
+            packet = args[2]
+
+            start_delayed(self.__env, self.__process_packet(of_type, packet, event_id), delay)
+
+        for event_id, args in self.__event_log['legit_to_sphinx'].items():
+            delay = args[0] - self.__end_time
+            mail = args[1]
+            msg = args[2]
+            split = args[3]
+
+            start_delayed(self.__env, self.__legit_to_sphinx(mail, msg, split, event_id), delay)
+
+        for event_id, args in self.__event_log['put_on_legit_queue'].items():
+            delay = args[0] - self.__end_time
+            sender = args[1]
+            packet = args[2]
+
+            self.__env.process(self.__put_on_legit_queue(sender, packet, delay, event_id))
+
+    def run_simulation(self, until: Optional[float] = None):
+        assert until is None or until > 0, 'until must be positive'
+
+        num_delivered = len([1 for remain, _ in self.__latency_tracker.values() if remain == 0])
+
+        self.__pbar.reset(total=len(self.__traces) - num_delivered)
 
         for mail in self.__traces:
             self.__env.process(self.__legit_wrapper(mail))
@@ -578,7 +699,11 @@ class Simulator:
         for thread in threads:
             thread.start()
 
-        self.__env.run(self.__termination_event)
+        if until is None:
+            self.__env.run(self.__termination_event)
+        else:
+            self.__env.run(self.__start_time + until)
+            self.__pbar.close()
 
         for node in self.__pki.values():
             send_packet(b'TERMINATE_SIMULATION', node.port)
@@ -586,4 +711,10 @@ class Simulator:
         for thread in threads:
             thread.join()
 
-        return self.__event_log
+
+def load_simulation(file_name: str) -> Simulator:
+    with open(file_name, 'rb') as file:
+        simulator = pickle.load(file)
+
+    simulator.fix_loaded()
+    return simulator

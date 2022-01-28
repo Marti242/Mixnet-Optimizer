@@ -4,7 +4,7 @@ from socket import SOCK_DGRAM
 from typing import Tuple
 
 from numpy import log2
-from packet import Packet
+from model.packet import Packet
 from sphinxmix.SphinxNode import sphinx_process
 from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import PFdecode
@@ -21,16 +21,16 @@ class Node:
     """NODE"""
 
     def __init__(self, layer: int, node_id: str, params: SphinxParams, add_buffer: int):
-        self.__params = params
         self.__node_id = node_id
         self.__tag_cache = set()
         self.__add_buffer = add_buffer
-        self.__secret_key = params.group.gensecret()
-        self.__params_dict = {(params.max_len, params.m): params}
 
         self.port = 49152 + int(node_id[1:])
         self.layer = layer
-        self.public_key = params.group.expon(params.group.g, [self.__secret_key])
+        self.params = params
+        self.secret_key = params.group.gensecret()
+        self.public_key = params.group.expon(params.group.g, [self.secret_key])
+        self.params_dict = {(params.max_len, params.m): params}
 
         self.h_t = 0.0
         self.k_t = 0.0
@@ -41,15 +41,15 @@ class Node:
         self.running_latency = 0.0
 
     def process_packet(self, data: bytes) -> Tuple:
-        unpacked = unpack_message(self.__params_dict, data)
+        unpacked = unpack_message(self.params_dict, data)
         header = unpacked[1][0]
         delta = unpacked[1][1]
 
-        processed = sphinx_process(self.__params, self.__secret_key, header, delta)
+        processed = sphinx_process(self.params, self.secret_key, header, delta)
         tag = processed[0]
         routing = processed[1]
 
-        routing = PFdecode(self.__params, routing)
+        routing = PFdecode(self.params, routing)
         flag = routing[0]
 
         if tag in self.__tag_cache:
@@ -65,7 +65,7 @@ class Node:
             split = routing[1][3]
             of_type = ID_TO_TYPE[routing[1][4]]
 
-            packed = pack_message(self.__params, processed[2])
+            packed = pack_message(self.params, processed[2])
             queue_tuple = Packet(packed, next_node, msg_id, split, of_type, self.__node_id)
 
             return delay, queue_tuple
@@ -74,7 +74,7 @@ class Node:
             delta = processed[2][1]
             mac_key = processed[3]
 
-            dest, _ = receive_forward(self.__params, mac_key, delta)
+            dest, _ = receive_forward(self.params, mac_key, delta)
             destination = dest[0].decode('utf-8')
             msg_id = dest[1]
             split = dest[2]
@@ -113,7 +113,7 @@ class Node:
             server.bind(('127.0.0.1', self.port))
 
             data = None
-            buffer_size = self.__params.max_len + self.__params.m + self.__add_buffer
+            buffer_size = self.params.max_len + self.params.m + self.__add_buffer
 
             while data != b'TERMINATE_SIMULATION':
                 data, _ = server.recvfrom(buffer_size)
