@@ -4,6 +4,7 @@ from socket import SOCK_DGRAM
 from typing import Tuple
 
 from numpy import log2
+from numpy import array
 from model.packet import Packet
 from sphinxmix.SphinxNode import sphinx_process
 from sphinxmix.SphinxParams import SphinxParams
@@ -14,7 +15,7 @@ from sphinxmix.SphinxClient import pack_message
 from sphinxmix.SphinxClient import unpack_message
 from sphinxmix.SphinxClient import receive_forward
 
-ID_TO_TYPE = {0: 'LEGIT', 1: 'LOOP', 2: 'DROP', 3: 'LOOP_MIX'}
+ID_TO_TYPE = {0: 'PAYLOAD', 1: 'LOOP', 2: 'DROP', 3: 'LOOP_MIX'}
 
 
 class Node:
@@ -32,9 +33,12 @@ class Node:
         self.public_key = params.group.expon(params.group.g, [self.secret_key])
         self.params_dict = {(params.max_len, params.m): params}
 
+        self.k_t = 0
+        self.l_t = 0
         self.h_t = 0.0
-        self.k_t = 0.0
-        self.l_t = 0.0
+
+        self.n = 0
+        self.prob_sum = array([0.0, 0.0, 0.0])
 
         self.sending_time = dict()
         self.last_latency = 0.0

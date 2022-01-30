@@ -20,11 +20,13 @@ from node import Node
 from util import send_packet
 from model.mail import Mail
 from model.packet import Packet
+from model.event_log import EventLog
 
 from simpy import Environment
 from simpy.util import start_delayed
 
 from numpy import ceil
+from numpy import log2
 from numpy import array
 from numpy.random import RandomState
 
@@ -36,7 +38,8 @@ from sphinxmix.SphinxClient import rand_subset
 from sphinxmix.SphinxClient import pack_message
 from sphinxmix.SphinxClient import create_forward_message
 
-TYPE_TO_ID = {'LEGIT': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
+EPSILON = 1e-16
+TYPE_TO_ID = {'PAYLOAD': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
 CLIENT_MODES = ['ALL_SIMULATION', 'TIME_PROXIMITY', 'UNIFORM_PROVIDER']
 ALL_CHARACTERS = list(ascii_letters + digits + punctuation + ' ')
 
@@ -64,16 +67,19 @@ class Simulator:
         nodes_per_layer = 2
         self.__end_time = 0.0
         self.__body_size = 5436
+        self.__time_unit = 3.9395182525289467
         self.__start_time = 0.0
         self.__loop_mix_entropy = False
 
         if 'lag' in config:
             assert isinstance(config['lag'], float), 'lag must be float'
+            assert config['lag'] >= 0.0, 'lag must be non-negative'
 
             self.__lag = config['lag']
 
         if 'layers' in config:
             assert isinstance(config['layers'], int), 'layers must be int'
+            assert config['layers'] >= 0, 'layers must be non-negative'
 
             self.__layers = config['layers']
 
@@ -82,32 +88,47 @@ class Simulator:
 
             lambdas = [isinstance(value, float) for value in config['lambdas'].values()]
 
-            assert all(lambdas), 'All lambdas must be float.'
+            assert all(lambdas), 'All lambdas must be float'
+
+            lambdas = [value > 0.0 for value in config['lambdas'].values()]
+
+            assert all(lambdas), 'All lambdas must be positive'
 
             self.__lambdas = config['lambdas']
 
         if 'rng_seed' in config:
             assert isinstance(config['rng_seed'], int), 'rng_seed must be int'
+            assert config['rng_seed'] >= 0, 'rng_seed must be non-negative'
 
             self.__rng = RandomState(config['rng_seed'])
 
         if 'body_size' in config:
             assert isinstance(config['body_size'], int), 'body_size must be int'
+            assert config['body_size'] > 0, 'body_size must be positive'
 
             self.__body_size = config['body_size']
 
+        if 'time_unit' in config:
+            assert isinstance(config['time_unit'], float), 'time_unit must be float'
+            assert config['time_unit'] > 0.0, 'time_unit must be positive'
+
+            self.__time_unit = config['time_unit']
+
         if 'start_time' in config:
             assert isinstance(config['start_time'], float), 'start_time must be float'
+            assert config['start_time'] >= 0.0, 'start_time must be non-negative'
 
             self.__start_time = config['start_time']
 
         if 'num_providers' in config:
             assert isinstance(config['num_providers'], int), 'num_providers must be int'
+            assert config['num_providers'] > 0, 'num_providers must be positive'
 
             num_providers = config['num_providers']
 
         if 'nodes_per_layer' in config:
             assert isinstance(config['nodes_per_layer'], int), 'nodes_per_layer must be int'
+            assert config['nodes_per_layer'] > 0, 'nodes_per_layer must be positive'
 
             nodes_per_layer = config['nodes_per_layer']
 
@@ -173,9 +194,10 @@ class Simulator:
         self.__users = {user: None for user in sorted(list(set(self.__users)))}
         self.__senders = sorted(list(set(self.__senders)))
 
-        self.__legit_queues = {sender: Queue() for sender in self.__senders}
+        self.__payload_queues = {sender: Queue() for sender in self.__senders}
         self.__latency_tracker = {}
 
+        self.__epsilon = 0.0
         self.__entropy = 0.0
         self.__latency = 0.0
         self.__entropy_sum = 0.0
@@ -208,7 +230,7 @@ class Simulator:
 
         if 'num_senders' in config:
             assert isinstance(config['num_senders'], int), 'num_senders must be int'
-            assert config['num_senders'] > 0, 'num_senders must be positive'
+            assert config['num_senders'] > 1, 'num_senders must be at least 2'
 
             if self.__client_model == 'ALL_SIMULATION':
                 assert config['num_senders'] >= self.__num_senders, 'not enough senders'
@@ -244,6 +266,12 @@ class Simulator:
                 self.__fake_senders += [user_id]
                 self.__users[user_id] = f'p{self.__rng.randint(0, high=num_providers):06d}'
 
+        self.__challengers = self.__senders + self.__fake_senders
+
+        self.__rng.shuffle(self.__challengers)
+
+        self.__challengers = self.__challengers[:2]
+
         user_ids = list(self.__users.keys())
         num_users = len(self.__users)
         provider_nums = list(range(num_providers))
@@ -263,7 +291,7 @@ class Simulator:
         self.__provider_dist = array(list(dict(self.__provider_dist).values()))
         self.__provider_dist = self.__provider_dist / sum(self.__provider_dist)
 
-        keys = [('DROP', self.__num_senders), ('LEGIT', self.__num_senders)]
+        keys = [('DROP', self.__num_senders), ('PAYLOAD', self.__num_senders)]
         keys += [('LOOP', self.__num_senders), ('DELAY', 1), ('LOOP_MIX', len(self.__pki))]
 
         for key, divisor in keys:
@@ -272,12 +300,7 @@ class Simulator:
 
             self.__lambdas[key] /= divisor
 
-        self.__event_log = {'postprocess': {},
-                            'send_packet': {},
-                            'decoy_wrapper': {},
-                            'process_packet': {},
-                            'legit_to_sphinx': {},
-                            'put_on_legit_queue': {}}
+        self.__event_log = EventLog()
 
     def __random_plaintext(self, size: int) -> bytes:
         return bytes(''.join(list(self.__rng.choice(ALL_CHARACTERS, size))), encoding='utf-8')
@@ -311,7 +334,7 @@ class Simulator:
             for layer in range(1, len(self.__per_layer_pki)):
                 path += rand_subset(self.__per_layer_pki[layer], 1)
 
-            if of_type == 'LEGIT':
+            if of_type == 'PAYLOAD':
                 destination = bytes(receiver, encoding='utf-8')
                 receiver_provider = self.__users[receiver]
             elif of_type == 'DROP':
@@ -344,21 +367,22 @@ class Simulator:
 
         return Packet(packed, path[0], msg_id, split, of_type, sender, expected_delay, num_splits)
 
-    def __legit_wrapper(self, mail: Mail) -> Generator:
+    def __payload_wrapper(self, mail: Mail) -> Generator:
         yield self.__env.timeout(mail.time + self.__lag)
-        yield self.__env.process(self.__legit_to_sphinx(mail))
+        yield self.__env.process(self.__payload_to_sphinx(mail))
 
-    def __legit_to_sphinx(self,
-                          mail: Mail,
-                          msg_id: Optional[str] = None,
-                          start_split: int = 0,
-                          event_id: Optional[str] = None) -> Generator:
+    def __payload_to_sphinx(self,
+                            mail: Mail,
+                            msg_id: Optional[str] = None,
+                            start_split: int = 0,
+                            event_id: Optional[str] = None) -> Generator:
         start_time = time()
 
-        if event_id is not None and event_id in self.__event_log['legit_to_spinx']:
-            del self.__event_log['legit_to_spinx'][event_id]
+        if event_id is not None and event_id in self.__event_log.payload_to_sphinx:
+            del self.__event_log.payload_to_sphinx[event_id]
 
         sender = mail.sender
+        of_type = 'PAYLOAD'
         receiver = mail.receiver
         num_splits = int(ceil(mail.size / self.__body_size))
 
@@ -366,7 +390,7 @@ class Simulator:
             msg_id = str(ObjectId())
 
         def wrapper(split_id: str, size: int) -> Packet:
-            return self.__gen_packet(sender, msg_id, 'LEGIT', size, split_id, num_splits, receiver)
+            return self.__gen_packet(sender, msg_id, of_type, size, split_id, num_splits, receiver)
 
         for split_idx in range(start_split, num_splits):
             split_size = self.__body_size
@@ -374,35 +398,42 @@ class Simulator:
             if split_idx == num_splits - 1:
                 split_size = mail.size - self.__body_size * (num_splits - 1)
 
-            packet = wrapper(f"{split_idx:05d}", split_size)
+            packet = wrapper(f'{split_idx:05d}', split_size)
             event_id = str(ObjectId())
 
             runtime = time() - start_time
             next_time = runtime + self.__env.now
-            self.__event_log['legit_to_sphinx'][event_id] = (next_time, mail, msg_id, split_idx)
-            self.__event_log['put_on_legit_queue'][event_id] = (next_time, sender, packet)
+            self.__event_log.payload_to_sphinx[event_id] = (next_time, mail, msg_id, split_idx)
+            self.__event_log.put_on_payload_queue[event_id] = (next_time, sender, packet)
 
-            yield self.__env.process(self.__put_on_legit_queue(sender, packet, runtime, event_id))
+            yield self.__env.process(self.__put_on_payload_queue(sender, packet, runtime, event_id))
 
             start_time = time()
 
-    def __put_on_legit_queue(self,
-                             sender: str,
-                             packet: Packet,
-                             runtime: float,
-                             event_id: str) -> Generator:
+    def __put_on_payload_queue(self,
+                               sender: str,
+                               packet: Packet,
+                               runtime: float,
+                               event_id: str) -> Generator:
         yield self.__env.timeout(runtime)
-        del self.__event_log['put_on_legit_queue'][event_id]
+        del self.__event_log.put_on_payload_queue[event_id]
 
-        if event_id in self.__event_log['legit_to_sphinx']:
-            del self.__event_log['legit_to_sphinx'][event_id]
+        if event_id in self.__event_log.payload_to_sphinx:
+            del self.__event_log.payload_to_sphinx[event_id]
 
-        self.__legit_queues[sender].put(packet)
+        self.__payload_queues[sender].put(packet)
+
+    def __challenge_worker(self, num: int) -> Generator:
+        while True:
+            self.__event_log.challenge_worker[num] = self.__env.now + self.__time_unit
+
+            yield self.__env.timeout(self.__time_unit)
+            self.__env.process(self.__send_packet(f'CHALLENGE_{num}'))
 
     def __decoy_worker(self, of_type: str) -> Generator:
         while True:
             delay = self.__rng.exponential(self.__lambdas[of_type])
-            self.__event_log['decoy_wrapper'][of_type] = self.__env.now + delay
+            self.__event_log.decoy_wrapper[of_type] = self.__env.now + delay
 
             yield self.__env.timeout(delay)
             self.__env.process(self.__send_packet(of_type))
@@ -411,11 +442,11 @@ class Simulator:
         if self.__client_model == 'ALL_SIMULATION':
             return self.__rng.choice(self.__senders + self.__fake_senders)
 
-        min_senders = [user for user, queue in self.__legit_queues.items() if not queue.empty()]
+        min_senders = [user for user, queue in self.__payload_queues.items() if not queue.empty()]
         num_senders = max(len(min_senders), self.__num_senders)
 
         if num_senders != self.__actual_senders:
-            for key in ['LEGIT', 'LOOP', 'DROP']:
+            for key in ['PAYLOAD', 'LOOP', 'DROP']:
                 self.__lambdas[key] = self.__lambdas[key] * self.__actual_senders / num_senders
 
             self.__actual_senders = num_senders
@@ -450,31 +481,39 @@ class Simulator:
     def __send_packet(self,
                       of_type: str,
                       data: Optional[Packet] = None,
+                      node_id: Optional[str] = None,
                       event_id: Optional[str] = None) -> Generator:
         start_time = time()
 
         if event_id is not None:
-            del self.__event_log['send_packet'][event_id]
+            del self.__event_log.send_packet[event_id]
 
         if of_type == 'DELAY':
             sender = data.sender
         elif of_type == 'LOOP_MIX':
             sender = self.__rng.choice(list(self.__pki.keys()))
+        elif of_type[:-1] == 'CHALLENGE_':
+            sender = self.__challengers[int(of_type[-1])]
         else:
             sender = self.__sample_sender()
 
-        if of_type == 'LEGIT':
-            if sender in self.__senders and not self.__legit_queues[sender].empty():
-                data = self.__legit_queues[sender].get()
+        if of_type == 'PAYLOAD':
+            if sender in self.__senders and not self.__payload_queues[sender].empty():
+                data = self.__payload_queues[sender].get()
 
         if data is None:
             actual_type = of_type
 
-            if of_type == 'LEGIT':
+            if of_type in ['PAYLOAD', 'CHALLENGE_0', 'CHALLENGE_1']:
                 actual_type = 'DROP'
 
             msg_id = str(ObjectId())
             data = self.__gen_packet(sender, msg_id, actual_type, self.__body_size)
+
+            if of_type == 'CHALLENGE_0':
+                data.dist = array([1.0, 0.0, 0.0])
+            elif of_type == 'CHALLENGE_1':
+                data.dist = array([0.0, 1.0, 0.0])
 
         packet = data.packet
         msg_id = data.msg_id
@@ -485,13 +524,35 @@ class Simulator:
             expected_delay = data.expected_delay
             self.__pki[sender].sending_time[msg_id] = (self.__env.now, expected_delay)
 
+        if of_type == 'DELAY' and data.of_type != 'LOOP_MIX':
+            data.dist = self.__pki[node_id].prob_sum / self.__pki[node_id].n
+            data.dist = data.dist / sum(data.dist)
+            self.__pki[node_id].n -= 1
+            self.__pki[node_id].prob_sum = data.dist * self.__pki[node_id].n
+
+            if self.__pki[node_id].layer == self.__layers:
+                if data.dist[0] == 0.0 and data.dist[1] == 0.0:
+                    new_epsilon = 0.0
+                elif data.dist[0] == 0.0:
+                    new_epsilon = abs(log2(EPSILON / data.dist[1]))
+                elif data.dist[1] == 0.0:
+                    new_epsilon = abs(log2(data.dist[0] / EPSILON))
+                else:
+                    new_epsilon = abs(log2(data.dist[0] / data.dist[1]))
+
+                self.__epsilon = 0.01 * new_epsilon + 0.99 * self.__epsilon
+
+                self.__pbar.set_postfix({'E2E': self.__epsilon,
+                                         'entropy': self.__entropy,
+                                         'latency': self.__latency})
+
         send_packet(packet, next_address)
 
         event_id = str(ObjectId())
 
         runtime = time() - start_time
         next_time = self.__env.now + runtime
-        self.__event_log['process_packet'][event_id] = (next_time, of_type, data)
+        self.__event_log.process_packet[event_id] = (next_time, of_type, data)
 
         yield self.__env.timeout(runtime)
         yield self.__env.process(self.__process_packet(of_type, data, event_id))
@@ -499,7 +560,7 @@ class Simulator:
     def __process_packet(self, of_type: str, data: Packet, event_id: str) -> Generator:
         start_time = time()
 
-        del self.__event_log['process_packet'][event_id]
+        del self.__event_log.process_packet[event_id]
 
         split = data.split
         packet = data.packet
@@ -512,7 +573,7 @@ class Simulator:
 
         info('%s %s %s %s %s %s', time_str, sender, next_node, msg_id, split, actual_type)
 
-        if of_type == 'LEGIT' and actual_type == 'LEGIT':
+        if of_type == 'PAYLOAD' and actual_type == 'PAYLOAD':
             num_splits = data.num_splits
 
             if msg_id not in self.__latency_tracker:
@@ -526,7 +587,9 @@ class Simulator:
             self.__entropy_sum += self.__pki[sender].update_entropy()
             self.__entropy = self.__entropy_sum / len(self.__pki)
 
-            self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
+            self.__pbar.set_postfix({'E2E': self.__epsilon,
+                                     'entropy': self.__entropy,
+                                     'latency': self.__latency})
 
         outcome = self.__pki[next_node].process_packet(packet)
         event_id = str(ObjectId())
@@ -534,19 +597,23 @@ class Simulator:
         self.__pki[next_node].k_t += 1
 
         if isinstance(outcome[0], float) and isinstance(outcome[1], Packet):
+            if actual_type != 'LOOP_MIX':
+                self.__pki[next_node].n += 1
+                self.__pki[next_node].prob_sum += data.dist
+
             delay = outcome[0]
             data = outcome[1]
 
             runtime = time() - start_time + delay
             next_time = self.__env.now + runtime
-            self.__event_log['send_packet'][event_id] = (next_time, data)
+            self.__event_log.send_packet[event_id] = (next_time, data, next_node)
 
             yield self.__env.timeout(runtime)
-            yield self.__env.process(self.__send_packet('DELAY', data, event_id))
+            yield self.__env.process(self.__send_packet('DELAY', data, next_node, event_id))
         else:
             runtime = time() - start_time
             next_time = self.__env.now + runtime
-            self.__event_log['postprocess'][event_id] = (next_time,) + outcome + (next_node,)
+            self.__event_log.postprocess[event_id] = (next_time,) + outcome + (next_node,)
             args = outcome
             args += (next_node, runtime, event_id)
 
@@ -561,16 +628,16 @@ class Simulator:
                       runtime: float,
                       event_id: str) -> Generator:
         yield self.__env.timeout(runtime)
-        del self.__event_log['postprocess'][event_id]
+        del self.__event_log.postprocess[event_id]
 
         time_str = f"{self.__env.now:.7f}"
 
         info('%s %s %s %s %s %s', time_str, node_id, destination, msg_id, split, of_type)
 
-        if of_type == 'LEGIT':
+        if of_type == 'PAYLOAD':
             self.__latency_tracker[msg_id][0] -= 1
 
-        if of_type == 'LEGIT' and self.__latency_tracker[msg_id][0] == 0:
+        if of_type == 'PAYLOAD' and self.__latency_tracker[msg_id][0] == 0:
             latency = self.__env.now - self.__latency_tracker[msg_id][1]
 
             self.__latency_sum += latency
@@ -578,7 +645,9 @@ class Simulator:
             self.__latency = self.__latency_sum / self.__latency_num
 
             self.__pbar.update(1)
-            self.__pbar.set_postfix({'entropy': self.__entropy, 'latency': self.__latency})
+            self.__pbar.set_postfix({'E2E': self.__epsilon,
+                                     'entropy': self.__entropy,
+                                     'latency': self.__latency})
 
             if self.__latency_num == len(self.__traces):
                 self.__termination_event.succeed()
@@ -590,7 +659,7 @@ class Simulator:
         assert save_file[-4:] == '.pkl', 'Save file must be in pickle format'
 
         self.__end_time = self.__env.now
-        self.__legit_queues = {user: queue.queue for user, queue in self.__legit_queues.items()}
+        self.__payload_queues = {user: queue.queue for user, queue in self.__payload_queues.items()}
 
         del self.__env
         del self.__pbar
@@ -611,10 +680,10 @@ class Simulator:
         body_len = self.__body_size + self.__add_body
         header_len = 71 * self.__layers + 108
         sending_time = self.__end_time - self.__start_time - self.__lag
-        legit_queues = {user: (queue, Queue()) for user, queue in self.__legit_queues.items()}
+        payload_queues = {user: (queue, Queue()) for user, queue in self.__payload_queues.items()}
         num_delivered = len([1 for remain, _ in self.__latency_tracker.values() if remain == 0])
 
-        for old_queue, queue in legit_queues.values():
+        for old_queue, queue in payload_queues.values():
 
             for item in old_queue:
                 queue.put(item)
@@ -622,7 +691,7 @@ class Simulator:
         self.__env = Environment(initial_time=self.__end_time)
         self.__pbar = self.__tqdm(total=len(self.__traces) - num_delivered)
         self.__params = SphinxParams(body_len=body_len, header_len=header_len)
-        self.__legit_queues = {user: queue[1] for user, queue in legit_queues.items()}
+        self.__payload_queues = {user: queue[1] for user, queue in payload_queues.items()}
         self.__termination_event = self.__env.event()
 
         params_dict = {(self.__params.max_len, self.__params.m): self.__params}
@@ -635,10 +704,11 @@ class Simulator:
 
         for mail in self.__traces:
             if mail.time > sending_time:
-                self.__env.process(self.__legit_wrapper(mail))
+                self.__env.process(self.__payload_wrapper(mail))
 
-        for event_id, args in self.__event_log['postprocess'].items():
+        for event_id, args in self.__event_log.postprocess.items():
             delay = args[0] - self.__end_time
+            delay = fix_delay(delay)
             dest = args[1]
             msg = args[2]
             split = args[3]
@@ -647,39 +717,52 @@ class Simulator:
 
             self.__env.process(self.__postprocess(dest, msg, split, of_type, node, delay, event_id))
 
-        for event_id, args in self.__event_log['send_packet'].items():
+        for event_id, args in self.__event_log.send_packet.items():
             delay = args[0] - self.__end_time
+            delay = fix_delay(delay)
             packet = args[1]
+            node_id = args[2]
 
-            start_delayed(self.__env, self.__send_packet('DELAY', packet, event_id), delay)
+            start_delayed(self.__env, self.__send_packet('DELAY', packet, node_id, event_id), delay)
 
-        for of_type, next_time in self.__event_log['decoy_wrapper'].items():
+        for of_type, next_time in self.__event_log.decoy_wrapper.items():
             delay = next_time - self.__end_time
+            delay = fix_delay(delay)
 
             start_delayed(self.__env, self.__send_packet(of_type), delay)
             start_delayed(self.__env, self.__decoy_worker(of_type), delay)
 
-        for event_id, args in self.__event_log['process_packet'].items():
+        for event_id, args in self.__event_log.process_packet.items():
             delay = args[0] - self.__end_time
+            delay = fix_delay(delay)
             of_type = args[1]
             packet = args[2]
 
             start_delayed(self.__env, self.__process_packet(of_type, packet, event_id), delay)
 
-        for event_id, args in self.__event_log['legit_to_sphinx'].items():
+        for num, next_time in enumerate(self.__event_log.challenge_worker):
+            delay = next_time - self.__end_time
+            delay = fix_delay(delay)
+
+            start_delayed(self.__env, self.__send_packet(f'CHALLENGE_{num}'), delay)
+            start_delayed(self.__env, self.__challenge_worker(num), delay)
+
+        for event_id, args in self.__event_log.payload_to_sphinx.items():
             delay = args[0] - self.__end_time
+            delay = fix_delay(delay)
             mail = args[1]
             msg = args[2]
             split = args[3]
 
-            start_delayed(self.__env, self.__legit_to_sphinx(mail, msg, split, event_id), delay)
+            start_delayed(self.__env, self.__payload_to_sphinx(mail, msg, split, event_id), delay)
 
-        for event_id, args in self.__event_log['put_on_legit_queue'].items():
+        for event_id, args in self.__event_log.put_on_payload_queue.items():
             delay = args[0] - self.__end_time
+            delay = fix_delay(delay)
             sender = args[1]
             packet = args[2]
 
-            self.__env.process(self.__put_on_legit_queue(sender, packet, delay, event_id))
+            self.__env.process(self.__put_on_payload_queue(sender, packet, delay, event_id))
 
     def run_simulation(self, until: Optional[float] = None):
         assert until is None or until > 0, 'until must be positive'
@@ -689,10 +772,13 @@ class Simulator:
         self.__pbar.reset(total=len(self.__traces) - num_delivered)
 
         for mail in self.__traces:
-            self.__env.process(self.__legit_wrapper(mail))
+            self.__env.process(self.__payload_wrapper(mail))
 
-        for of_type in ['LOOP', 'DROP', 'LEGIT', 'LOOP_MIX']:
+        for of_type in ['LOOP', 'DROP', 'PAYLOAD', 'LOOP_MIX']:
             self.__env.process(self.__decoy_worker(of_type))
+
+        self.__env.process(self.__challenge_worker(0))
+        self.__env.process(self.__challenge_worker(1))
 
         threads = [Thread(target=node.listener) for node in self.__pki.values()]
 
@@ -718,3 +804,9 @@ def load_simulation(file_name: str) -> Simulator:
 
     simulator.fix_loaded()
     return simulator
+
+
+def fix_delay(delay: float):
+    if delay <= 0.0:
+        return EPSILON
+    return delay

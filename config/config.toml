@@ -3,6 +3,7 @@ layers           = 2
 rng_seed         = 0
 log_file         = "../../logs/logs.log"
 body_size        = 5436
+time_unit        = 3.9395182525289467
 start_time       = 1575154800.901652
 traces_file      = "../../data/sample.json"
 num_senders      = 14

@@ -1,3 +1,4 @@
+from numpy import array
 from typing import Optional
 
 
@@ -21,3 +22,6 @@ class Packet:
         self.sender = sender
         self.expected_delay = expected_delay
         self.num_splits = num_splits
+
+        if of_type != 'LOOP_MIX':
+            self.dist = array([0.0, 0.0, 1.0])
