@@ -24,6 +24,7 @@ from model.event_log import EventLog
 
 from simpy import Environment
 from simpy.util import start_delayed
+from simpy.events import Event
 
 from numpy import ceil
 from numpy import log2
@@ -40,6 +41,7 @@ from sphinxmix.SphinxClient import create_forward_message
 
 EPSILON = 1e-16
 TYPE_TO_ID = {'PAYLOAD': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
+BAR_FORMAT = "{percentage:.1f}%|{bar}| {n:.1f}/{total:.1f} [{elapsed}<{remaining}, {postfix}]"
 CLIENT_MODES = ['ALL_SIMULATION', 'TIME_PROXIMITY', 'UNIFORM_PROVIDER']
 ALL_CHARACTERS = list(ascii_letters + digits + punctuation + ' ')
 
@@ -212,7 +214,7 @@ class Simulator:
         self.__tqdm = tqdm
 
         self.__env = Environment(initial_time=self.__start_time)
-        self.__pbar = tqdm(total=len(self.__traces))
+        self.__pbar = tqdm(total=len(self.__traces), bar_format=BAR_FORMAT)
         self.__termination_event = self.__env.event()
 
         self.__client_model = 'ALL_SIMULATION'
@@ -304,6 +306,17 @@ class Simulator:
 
     def __random_plaintext(self, size: int) -> bytes:
         return bytes(''.join(list(self.__rng.choice(ALL_CHARACTERS, size))), encoding='utf-8')
+
+    def __update_pbar(self):
+        if isinstance(self.__termination_event, float):
+            update = round(self.__env.now - self.__start_time - self.__pbar.n, 1)
+
+            self.__pbar.update(update)
+
+        self.__pbar.set_postfix({'E2E': self.__epsilon,
+                                 'entropy': self.__entropy,
+                                 'latency': self.__latency,
+                                 'delivered': self.__latency_num})
 
     def __gen_packet(self,
                      sender: str,
@@ -542,9 +555,7 @@ class Simulator:
 
                 self.__epsilon = 0.01 * new_epsilon + 0.99 * self.__epsilon
 
-                self.__pbar.set_postfix({'E2E': self.__epsilon,
-                                         'entropy': self.__entropy,
-                                         'latency': self.__latency})
+                self.__update_pbar()
 
         send_packet(packet, next_address)
 
@@ -587,9 +598,7 @@ class Simulator:
             self.__entropy_sum += self.__pki[sender].update_entropy()
             self.__entropy = self.__entropy_sum / len(self.__pki)
 
-            self.__pbar.set_postfix({'E2E': self.__epsilon,
-                                     'entropy': self.__entropy,
-                                     'latency': self.__latency})
+            self.__update_pbar()
 
         outcome = self.__pki[next_node].process_packet(packet)
         event_id = str(ObjectId())
@@ -644,14 +653,15 @@ class Simulator:
             self.__latency_num += 1
             self.__latency = self.__latency_sum / self.__latency_num
 
-            self.__pbar.update(1)
-            self.__pbar.set_postfix({'E2E': self.__epsilon,
-                                     'entropy': self.__entropy,
-                                     'latency': self.__latency})
+            self.__update_pbar()
 
-            if self.__latency_num == len(self.__traces):
-                self.__termination_event.succeed()
-                self.__pbar.close()
+            if isinstance(self.__termination_event, Event):
+                self.__pbar.update(1)
+
+                if self.__latency_num == len(self.__traces):
+                    self.__termination_event.succeed()
+                    self.__pbar.close()
+
         elif of_type == 'LOOP_MIX':
             self.__pki[node_id].postprocess(self.__env.now, msg_id)
 
@@ -689,7 +699,7 @@ class Simulator:
                 queue.put(item)
 
         self.__env = Environment(initial_time=self.__end_time)
-        self.__pbar = self.__tqdm(total=len(self.__traces) - num_delivered)
+        self.__pbar = self.__tqdm(total=len(self.__traces) - num_delivered, bar_format=BAR_FORMAT)
         self.__params = SphinxParams(body_len=body_len, header_len=header_len)
         self.__payload_queues = {user: queue[1] for user, queue in payload_queues.items()}
         self.__termination_event = self.__env.event()
@@ -767,10 +777,6 @@ class Simulator:
     def run_simulation(self, until: Optional[float] = None):
         assert until is None or until > 0, 'until must be positive'
 
-        num_delivered = len([1 for remain, _ in self.__latency_tracker.values() if remain == 0])
-
-        self.__pbar.reset(total=len(self.__traces) - num_delivered)
-
         for mail in self.__traces:
             self.__env.process(self.__payload_wrapper(mail))
 
@@ -786,10 +792,20 @@ class Simulator:
             thread.start()
 
         if until is None:
-            self.__env.run(self.__termination_event)
+            num_delivered = len([1 for remain, _ in self.__latency_tracker.values() if remain == 0])
+
+            self.__pbar.reset(total=len(self.__traces) - num_delivered)
         else:
-            self.__env.run(self.__start_time + until)
-            self.__pbar.close()
+            self.__pbar.reset(total=until)
+
+            self.__termination_event = self.__start_time + until
+
+        self.__env.run(self.__termination_event)
+
+        if until is not None:
+            self.__pbar.update(until - self.__pbar.n)
+
+        self.__pbar.close()
 
         for node in self.__pki.values():
             send_packet(b'TERMINATE_SIMULATION', node.port)
