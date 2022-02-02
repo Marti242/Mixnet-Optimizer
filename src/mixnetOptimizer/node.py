@@ -65,12 +65,10 @@ class Node:
         if flag == Relay_flag:
             next_node = routing[1][0]
             delay = float(routing[1][1])
-            msg_id = routing[1][2]
-            split = routing[1][3]
-            of_type = ID_TO_TYPE[routing[1][4]]
+            of_type = ID_TO_TYPE[routing[1][2]]
 
             packed = pack_message(self.params, processed[2])
-            queue_tuple = Packet(packed, next_node, msg_id, split, of_type, self.__node_id)
+            queue_tuple = Packet(packed, next_node, of_type, self.__node_id)
 
             return delay, queue_tuple
 

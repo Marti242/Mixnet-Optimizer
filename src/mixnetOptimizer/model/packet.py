@@ -8,12 +8,12 @@ class Packet:
     def __init__(self,
                  packet: bytes,
                  next_node: str,
-                 msg_id: str,
-                 split: str,
                  of_type: str,
                  sender: str,
-                 expected_delay: Optional[float] = None,
-                 num_splits: Optional[int] = None):
+                 split: Optional[str] = None,
+                 msg_id: Optional[str] = None,
+                 num_splits: Optional[int] = None,
+                 expected_delay: Optional[float] = None):
         self.packet = packet
         self.msg_id = msg_id
         self.next_node = next_node

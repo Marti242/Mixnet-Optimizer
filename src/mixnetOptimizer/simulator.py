@@ -2,6 +2,7 @@ import json
 import pickle
 
 from time import time
+from uuid import uuid4
 from queue import Queue
 from string import digits
 from string import punctuation
@@ -31,7 +32,6 @@ from numpy import log2
 from numpy import array
 from numpy.random import RandomState
 
-from bson import ObjectId
 from petlib.bn import Bn
 from sphinxmix.SphinxParams import SphinxParams
 from sphinxmix.SphinxClient import Nenc
@@ -142,19 +142,21 @@ class Simulator:
         basicConfig(filename=config['log_file'], level=INFO, encoding='utf-8')
 
         if self.__body_size < 65536:
-            self.__add_body = 63
+            self.__add_body = 72
             add_buffer = 36
         else:
-            self.__add_body = 65
+            self.__add_body = 74
             add_buffer = 40
 
-        if 0 < self.__layers < 3:
+        if 1 < self.__layers < 5:
             add_buffer += 1
-        elif 2 < self.__layers:
+        elif self.__layers == 5:
+            add_buffer += 2
+        elif 5 < self.__layers:
             add_buffer += 3
 
         body_len = self.__body_size + self.__add_body
-        header_len = 71 * self.__layers + 108
+        header_len = 40 * self.__layers + 77
         self.__params = SphinxParams(body_len=body_len, header_len=header_len)
         self.__pki = {}
         self.__providers = []
@@ -362,15 +364,12 @@ class Simulator:
         keys = [self.__pki[node_id].public_key for node_id in path]
         destination = (destination, msg_id, split, TYPE_TO_ID[of_type])
 
-        def nenc_wrapper(target: str, delay_val: float) -> bytes:
-            return Nenc((target, delay_val, msg_id, split, TYPE_TO_ID[of_type]))
-
-        routing = [nenc_wrapper(path[0], 0.0)]
+        routing = [Nenc((path[0], 0.0, TYPE_TO_ID[of_type]))]
         expected_delay = 0.0
 
         for dest in path[1:]:
             delay = self.__rng.exponential(self.__lambdas['DELAY'])
-            routing += [nenc_wrapper(dest, delay)]
+            routing += [Nenc((dest, delay, TYPE_TO_ID[of_type]))]
             expected_delay += delay
 
         message = self.__random_plaintext(size)
@@ -378,7 +377,7 @@ class Simulator:
         header, delta = create_forward_message(self.__params, routing, keys, destination, message)
         packed = pack_message(self.__params, (header, delta))
 
-        return Packet(packed, path[0], msg_id, split, of_type, sender, expected_delay, num_splits)
+        return Packet(packed, path[0], of_type, sender, split, msg_id, num_splits, expected_delay)
 
     def __payload_wrapper(self, mail: Mail) -> Generator:
         yield self.__env.timeout(mail.time + self.__lag)
@@ -400,7 +399,7 @@ class Simulator:
         num_splits = int(ceil(mail.size / self.__body_size))
 
         if msg_id is None:
-            msg_id = str(ObjectId())
+            msg_id = uuid4().hex
 
         def wrapper(split_id: str, size: int) -> Packet:
             return self.__gen_packet(sender, msg_id, of_type, size, split_id, num_splits, receiver)
@@ -412,7 +411,7 @@ class Simulator:
                 split_size = mail.size - self.__body_size * (num_splits - 1)
 
             packet = wrapper(f'{split_idx:05d}', split_size)
-            event_id = str(ObjectId())
+            event_id = uuid4().hex
 
             runtime = time() - start_time
             next_time = runtime + self.__env.now
@@ -520,7 +519,7 @@ class Simulator:
             if of_type in ['PAYLOAD', 'CHALLENGE_0', 'CHALLENGE_1']:
                 actual_type = 'DROP'
 
-            msg_id = str(ObjectId())
+            msg_id = uuid4().hex
             data = self.__gen_packet(sender, msg_id, actual_type, self.__body_size)
 
             if of_type == 'CHALLENGE_0':
@@ -529,11 +528,11 @@ class Simulator:
                 data.dist = array([0.0, 1.0, 0.0])
 
         packet = data.packet
-        msg_id = data.msg_id
         next_node = data.next_node
         next_address = self.__pki[next_node].port
 
         if of_type == 'LOOP_MIX':
+            msg_id = data.msg_id
             expected_delay = data.expected_delay
             self.__pki[sender].sending_time[msg_id] = (self.__env.now, expected_delay)
 
@@ -559,7 +558,7 @@ class Simulator:
 
         send_packet(packet, next_address)
 
-        event_id = str(ObjectId())
+        event_id = uuid4().hex
 
         runtime = time() - start_time
         next_time = self.__env.now + runtime
@@ -573,18 +572,17 @@ class Simulator:
 
         del self.__event_log.process_packet[event_id]
 
-        split = data.split
         packet = data.packet
         sender = data.sender
-        msg_id = data.msg_id
         next_node = data.next_node
         actual_type = data.of_type
 
         time_str = f"{self.__env.now:.7f}"
 
-        info('%s %s %s %s %s %s', time_str, sender, next_node, msg_id, split, actual_type)
+        info('%s %s %s', time_str, sender, next_node)
 
         if of_type == 'PAYLOAD' and actual_type == 'PAYLOAD':
+            msg_id = data.msg_id
             num_splits = data.num_splits
 
             if msg_id not in self.__latency_tracker:
@@ -601,7 +599,7 @@ class Simulator:
             self.__update_pbar()
 
         outcome = self.__pki[next_node].process_packet(packet)
-        event_id = str(ObjectId())
+        event_id = uuid4().hex
 
         self.__pki[next_node].k_t += 1
 
@@ -688,13 +686,12 @@ class Simulator:
 
     def fix_loaded(self):
         body_len = self.__body_size + self.__add_body
-        header_len = 71 * self.__layers + 108
+        header_len = 40 * self.__layers + 77
         sending_time = self.__end_time - self.__start_time - self.__lag
         payload_queues = {user: (queue, Queue()) for user, queue in self.__payload_queues.items()}
         num_delivered = len([1 for remain, _ in self.__latency_tracker.values() if remain == 0])
 
         for old_queue, queue in payload_queues.values():
-
             for item in old_queue:
                 queue.put(item)
 
@@ -775,7 +772,7 @@ class Simulator:
             self.__env.process(self.__put_on_payload_queue(sender, packet, delay, event_id))
 
     def run_simulation(self, until: Optional[float] = None):
-        assert until is None or until > 0, 'until must be positive'
+        assert until is None or until > 0.0, 'until must be positive'
 
         for mail in self.__traces:
             self.__env.process(self.__payload_wrapper(mail))
