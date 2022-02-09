@@ -41,7 +41,7 @@ from sphinxmix.SphinxClient import create_forward_message
 
 EPSILON = 1e-16
 TYPE_TO_ID = {'PAYLOAD': 0, 'LOOP': 1, 'DROP': 2, 'LOOP_MIX': 3}
-BAR_FORMAT = "{percentage:.1f}%|{bar}| {n:.1f}/{total:.1f} [{elapsed}<{remaining}, {postfix}]"
+BAR_FORMAT = "{percentage:.1f}%|{bar}| {n:.1f}/{total:.1f} [{elapsed}<{remaining} {postfix}]"
 CLIENT_MODES = ['ALL_SIMULATION', 'TIME_PROXIMITY', 'UNIFORM_PROVIDER']
 ALL_CHARACTERS = list(ascii_letters + digits + punctuation + ' ')
 
@@ -62,19 +62,21 @@ class Simulator:
         assert config['traces_file'][-5:] == '.json', 'Traces file must be in JSON format'
 
         self.__rng = RandomState()
-        self.__lag = 10.0
+        self.__lag = 2600.0
         self.__layers = 2
         num_providers = 2
+        self.__e2e_lag = 2500.0
         self.__lambdas = {}
         nodes_per_layer = 2
         self.__end_time = 0.0
         self.__body_size = 5436
-        self.__time_unit = 3.9395182525289467
+        self.__base_port = 49152
+        self.__time_unit = 1.0
         self.__start_time = 0.0
         self.__loop_mix_entropy = False
 
         if 'lag' in config:
-            assert isinstance(config['lag'], float), 'lag must be float'
+            assert isinstance(config['lag'], (int, float)), 'lag must be number'
             assert config['lag'] >= 0.0, 'lag must be non-negative'
 
             self.__lag = config['lag']
@@ -85,12 +87,18 @@ class Simulator:
 
             self.__layers = config['layers']
 
+        if 'e2e_lag' in config:
+            assert isinstance(config['e2e_lag'], (int, float)), 'e2e_lag must be number'
+            assert config['e2e_lag'] >= 0.0, 'e2e_lag must be non-negative'
+
+            self.__e2e_lag = config['e2e_lag']
+
         if 'lambdas' in config:
             assert isinstance(config['lambdas'], dict), 'lambdas must be dict'
 
-            lambdas = [isinstance(value, float) for value in config['lambdas'].values()]
+            lambdas = [isinstance(value, (int, float)) for value in config['lambdas'].values()]
 
-            assert all(lambdas), 'All lambdas must be float'
+            assert all(lambdas), 'All lambdas must be number'
 
             lambdas = [value > 0.0 for value in config['lambdas'].values()]
 
@@ -110,17 +118,24 @@ class Simulator:
 
             self.__body_size = config['body_size']
 
+        if 'base_port' in config:
+            assert isinstance(config['base_port'], int), 'base_port must be int'
+            assert config['base_port'] > 0, 'base_port must be positive'
+
+            self.__base_port = config['base_port']
+
         if 'time_unit' in config:
-            assert isinstance(config['time_unit'], float), 'time_unit must be float'
+            assert isinstance(config['time_unit'], (int, float)), 'time_unit must be number'
             assert config['time_unit'] > 0.0, 'time_unit must be positive'
 
             self.__time_unit = config['time_unit']
 
         if 'start_time' in config:
-            assert isinstance(config['start_time'], float), 'start_time must be float'
+            assert isinstance(config['start_time'], (float, int)), 'start_time must be number'
             assert config['start_time'] >= 0.0, 'start_time must be non-negative'
 
             self.__start_time = config['start_time']
+            self.__end_time = config['start_time']
 
         if 'num_providers' in config:
             assert isinstance(config['num_providers'], int), 'num_providers must be int'
@@ -163,7 +178,7 @@ class Simulator:
 
         for provider in range(num_providers):
             node_id = f'p{provider:06d}'
-            new_node = Node(0, node_id, self.__params, add_buffer)
+            new_node = Node(0, node_id, self.__params, self.__base_port, add_buffer)
 
             self.__pki[node_id] = new_node
             self.__providers += [node_id]
@@ -171,7 +186,7 @@ class Simulator:
         for layer in range(1, self.__layers + 1):
             for node in range(nodes_per_layer):
                 node_id = f'm{((layer - 1) * nodes_per_layer + node + num_providers):06d}'
-                new_node = Node(layer, node_id, self.__params, add_buffer)
+                new_node = Node(layer, node_id, self.__params, self.__base_port, add_buffer)
 
                 self.__pki[node_id] = new_node
 
@@ -266,7 +281,7 @@ class Simulator:
             assert 1e6 > difference + max_user_id, 'num_senders is too large'
 
             for user_idx in range(difference):
-                user_id = f'u{(1e6 - user_idx - 1):06d}'
+                user_id = f'u{(int(1e6) - user_idx - 1):06d}'
                 self.__fake_senders += [user_id]
                 self.__users[user_id] = f'p{self.__rng.randint(0, high=num_providers):06d}'
 
@@ -304,14 +319,15 @@ class Simulator:
 
             self.__lambdas[key] /= divisor
 
-        self.__event_log = EventLog()
+        self.__loaded = False
+        self.__event_log = EventLog(self.__start_time + self.__e2e_lag)
 
     def __random_plaintext(self, size: int) -> bytes:
         return bytes(''.join(list(self.__rng.choice(ALL_CHARACTERS, size))), encoding='utf-8')
 
     def __update_pbar(self):
-        if isinstance(self.__termination_event, float):
-            update = round(self.__env.now - self.__start_time - self.__pbar.n, 1)
+        if isinstance(self.__termination_event, (int, float)):
+            update = round(self.__env.now - self.__end_time - self.__pbar.n, 1)
 
             self.__pbar.update(update)
 
@@ -542,18 +558,15 @@ class Simulator:
             self.__pki[node_id].n -= 1
             self.__pki[node_id].prob_sum = data.dist * self.__pki[node_id].n
 
-            if self.__pki[node_id].layer == self.__layers:
-                if data.dist[0] == 0.0 and data.dist[1] == 0.0:
-                    new_epsilon = 0.0
-                elif data.dist[0] == 0.0:
-                    new_epsilon = abs(log2(EPSILON / data.dist[1]))
-                elif data.dist[1] == 0.0:
-                    new_epsilon = abs(log2(data.dist[0] / EPSILON))
-                else:
-                    new_epsilon = abs(log2(data.dist[0] / data.dist[1]))
+            is_non_zero = data.dist[0] > 0.0 and data.dist[1] > 0.0
+            is_last_layer = self.__pki[node_id].layer == self.__layers
+            is_measure_time = self.__env.now >= self.__start_time + self.__e2e_lag
 
+            if is_non_zero and is_last_layer and is_measure_time:
+                new_epsilon = abs(log2(data.dist[0] / data.dist[1]))
                 self.__epsilon = 0.01 * new_epsilon + 0.99 * self.__epsilon
 
+                info('%s %s', f"{self.__env.now:.7f}", str(new_epsilon))
                 self.__update_pbar()
 
         send_packet(packet, next_address)
@@ -577,10 +590,6 @@ class Simulator:
         next_node = data.next_node
         actual_type = data.of_type
 
-        time_str = f"{self.__env.now:.7f}"
-
-        info('%s %s %s', time_str, sender, next_node)
-
         if of_type == 'PAYLOAD' and actual_type == 'PAYLOAD':
             msg_id = data.msg_id
             num_splits = data.num_splits
@@ -596,6 +605,7 @@ class Simulator:
             self.__entropy_sum += self.__pki[sender].update_entropy()
             self.__entropy = self.__entropy_sum / len(self.__pki)
 
+            info('%s %s %s', f"{self.__env.now:.7f}", sender, str(self.__pki[sender].h_t))
             self.__update_pbar()
 
         outcome = self.__pki[next_node].process_packet(packet)
@@ -627,19 +637,13 @@ class Simulator:
             yield self.__env.process(self.__postprocess(*args))
 
     def __postprocess(self,
-                      destination: str,
                       msg_id: str,
-                      split: str,
                       of_type: str,
                       node_id: str,
                       runtime: float,
                       event_id: str) -> Generator:
         yield self.__env.timeout(runtime)
         del self.__event_log.postprocess[event_id]
-
-        time_str = f"{self.__env.now:.7f}"
-
-        info('%s %s %s %s %s %s', time_str, node_id, destination, msg_id, split, of_type)
 
         if of_type == 'PAYLOAD':
             self.__latency_tracker[msg_id][0] -= 1
@@ -716,13 +720,11 @@ class Simulator:
         for event_id, args in self.__event_log.postprocess.items():
             delay = args[0] - self.__end_time
             delay = fix_delay(delay)
-            dest = args[1]
-            msg = args[2]
-            split = args[3]
-            of_type = args[4]
-            node = args[5]
+            msg = args[1]
+            of_type = args[2]
+            node = args[3]
 
-            self.__env.process(self.__postprocess(dest, msg, split, of_type, node, delay, event_id))
+            self.__env.process(self.__postprocess(msg, of_type, node, delay, event_id))
 
         for event_id, args in self.__event_log.send_packet.items():
             delay = args[0] - self.__end_time
@@ -771,17 +773,20 @@ class Simulator:
 
             self.__env.process(self.__put_on_payload_queue(sender, packet, delay, event_id))
 
+        self.__loaded = True
+
     def run_simulation(self, until: Optional[float] = None):
         assert until is None or until > 0.0, 'until must be positive'
 
-        for mail in self.__traces:
-            self.__env.process(self.__payload_wrapper(mail))
+        if not self.__loaded:
+            for mail in self.__traces:
+                self.__env.process(self.__payload_wrapper(mail))
 
-        for of_type in ['LOOP', 'DROP', 'PAYLOAD', 'LOOP_MIX']:
-            self.__env.process(self.__decoy_worker(of_type))
+            for of_type in ['LOOP', 'DROP', 'PAYLOAD', 'LOOP_MIX']:
+                self.__env.process(self.__decoy_worker(of_type))
 
-        self.__env.process(self.__challenge_worker(0))
-        self.__env.process(self.__challenge_worker(1))
+            start_delayed(self.__env, self.__challenge_worker(0), self.__e2e_lag)
+            start_delayed(self.__env, self.__challenge_worker(1), self.__e2e_lag)
 
         threads = [Thread(target=node.listener) for node in self.__pki.values()]
 
@@ -795,7 +800,7 @@ class Simulator:
         else:
             self.__pbar.reset(total=until)
 
-            self.__termination_event = self.__start_time + until
+            self.__termination_event = self.__end_time + until
 
         self.__env.run(self.__termination_event)
 

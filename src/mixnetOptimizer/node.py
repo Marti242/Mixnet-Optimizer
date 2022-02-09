@@ -21,12 +21,17 @@ ID_TO_TYPE = {0: 'PAYLOAD', 1: 'LOOP', 2: 'DROP', 3: 'LOOP_MIX'}
 class Node:
     """NODE"""
 
-    def __init__(self, layer: int, node_id: str, params: SphinxParams, add_buffer: int):
+    def __init__(self,
+                 layer: int,
+                 node_id: str,
+                 params: SphinxParams,
+                 base_port: int,
+                 add_buffer: int):
         self.__node_id = node_id
         self.__tag_cache = set()
         self.__add_buffer = add_buffer
 
-        self.port = 49152 + int(node_id[1:])
+        self.port = base_port + int(node_id[1:])
         self.layer = layer
         self.params = params
         self.secret_key = params.group.gensecret()
@@ -77,12 +82,10 @@ class Node:
             mac_key = processed[3]
 
             dest, _ = receive_forward(self.params, mac_key, delta)
-            destination = dest[0].decode('utf-8')
             msg_id = dest[1]
-            split = dest[2]
             of_type = ID_TO_TYPE[dest[3]]
 
-            return destination, msg_id, split, of_type
+            return msg_id, of_type
 
     def postprocess(self, timestamp: float, msg_id: str):
         latency = max([timestamp - send_time for send_time, _ in self.sending_time.values()])
