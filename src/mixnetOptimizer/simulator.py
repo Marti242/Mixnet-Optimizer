@@ -9,9 +9,9 @@ from string import punctuation
 from string import ascii_letters
 from typing import Optional
 from typing import Generator
-from logging import info
-from logging import INFO
-from logging import basicConfig
+# from logging import info
+# from logging import INFO
+# from logging import basicConfig
 from threading import Thread
 from collections import Counter
 
@@ -154,7 +154,7 @@ class Simulator:
 
             self.__loop_mix_entropy = config['loop_mix_entropy']
 
-        basicConfig(filename=config['log_file'], level=INFO, encoding='utf-8')
+        # basicConfig(filename=config['log_file'], level=INFO, encoding='utf-8')
 
         if self.__body_size < 65536:
             self.__add_body = 72
@@ -396,8 +396,7 @@ class Simulator:
         return Packet(packed, path[0], of_type, sender, split, msg_id, num_splits, expected_delay)
 
     def __payload_wrapper(self, mail: Mail) -> Generator:
-        yield self.__env.timeout(mail.time + self.__lag)
-        yield self.__env.process(self.__payload_to_sphinx(mail))
+        yield start_delayed(self.__env, self.__payload_to_sphinx(mail), mail.time + self.__lag)
 
     def __payload_to_sphinx(self,
                             mail: Mail,
@@ -566,7 +565,7 @@ class Simulator:
                 new_epsilon = abs(log2(data.dist[0] / data.dist[1]))
                 self.__epsilon = 0.01 * new_epsilon + 0.99 * self.__epsilon
 
-                info('%s %s', f"{self.__env.now:.7f}", str(new_epsilon))
+                # info('%s %s', f"{self.__env.now:.7f}", str(new_epsilon))
                 self.__update_pbar()
 
         send_packet(packet, next_address)
@@ -577,8 +576,7 @@ class Simulator:
         next_time = self.__env.now + runtime
         self.__event_log.process_packet[event_id] = (next_time, of_type, data)
 
-        yield self.__env.timeout(runtime)
-        yield self.__env.process(self.__process_packet(of_type, data, event_id))
+        yield start_delayed(self.__env, self.__process_packet(of_type, data, event_id), runtime)
 
     def __process_packet(self, of_type: str, data: Packet, event_id: str) -> Generator:
         start_time = time()
@@ -605,7 +603,7 @@ class Simulator:
             self.__entropy_sum += self.__pki[sender].update_entropy()
             self.__entropy = self.__entropy_sum / len(self.__pki)
 
-            info('%s %s %s', f"{self.__env.now:.7f}", sender, str(self.__pki[sender].h_t))
+            # info('%s %s %s', f"{self.__env.now:.7f}", sender, str(self.__pki[sender].h_t))
             self.__update_pbar()
 
         outcome = self.__pki[next_node].process_packet(packet)
@@ -625,8 +623,9 @@ class Simulator:
             next_time = self.__env.now + runtime
             self.__event_log.send_packet[event_id] = (next_time, data, next_node)
 
-            yield self.__env.timeout(runtime)
-            yield self.__env.process(self.__send_packet('DELAY', data, next_node, event_id))
+            args = ('DELAY', data, next_node, event_id)
+
+            yield start_delayed(self.__env, self.__send_packet(*args), runtime)
         else:
             runtime = time() - start_time
             next_time = self.__env.now + runtime
